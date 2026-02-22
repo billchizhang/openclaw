@@ -30,6 +30,59 @@ describe("handleControlUiHttpRequest", () => {
     };
   }
 
+  function expectNotFoundResponse(params: {
+    handled: boolean;
+    res: ReturnType<typeof makeMockHttpResponse>["res"];
+    end: ReturnType<typeof makeMockHttpResponse>["end"];
+  }) {
+    expect(params.handled).toBe(true);
+    expect(params.res.statusCode).toBe(404);
+    expect(params.end).toHaveBeenCalledWith("Not Found");
+  }
+
+  function runControlUiRequest(params: {
+    url: string;
+    method: "GET" | "HEAD";
+    rootPath: string;
+    basePath?: string;
+  }) {
+    const { res, end } = makeMockHttpResponse();
+    const handled = handleControlUiHttpRequest(
+      { url: params.url, method: params.method } as IncomingMessage,
+      res,
+      {
+        ...(params.basePath ? { basePath: params.basePath } : {}),
+        root: { kind: "resolved", path: params.rootPath },
+      },
+    );
+    return { res, end, handled };
+  }
+
+  async function writeAssetFile(rootPath: string, filename: string, contents: string) {
+    const assetsDir = path.join(rootPath, "assets");
+    await fs.mkdir(assetsDir, { recursive: true });
+    const filePath = path.join(assetsDir, filename);
+    await fs.writeFile(filePath, contents);
+    return { assetsDir, filePath };
+  }
+
+  async function withBasePathRootFixture<T>(params: {
+    siblingDir: string;
+    fn: (paths: { root: string; sibling: string }) => Promise<T>;
+  }) {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-ui-root-"));
+    try {
+      const root = path.join(tmp, "ui");
+      const sibling = path.join(tmp, params.siblingDir);
+      await fs.mkdir(root, { recursive: true });
+      await fs.mkdir(sibling, { recursive: true });
+      await fs.writeFile(path.join(root, "index.html"), "<html>ok</html>\n");
+      return await params.fn({ root, sibling });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  }
+
   it("sets security headers for Control UI responses", async () => {
     await withControlUiRoot({
       fn: async (tmp) => {
@@ -145,10 +198,7 @@ describe("handleControlUiHttpRequest", () => {
               root: { kind: "resolved", path: tmp },
             },
           );
-
-          expect(handled).toBe(true);
-          expect(res.statusCode).toBe(404);
-          expect(end).toHaveBeenCalledWith("Not Found");
+          expectNotFoundResponse({ handled, res, end });
         } finally {
           await fs.rm(outsideDir, { recursive: true, force: true });
         }
@@ -159,19 +209,14 @@ describe("handleControlUiHttpRequest", () => {
   it("allows symlinked assets that resolve inside control-ui root", async () => {
     await withControlUiRoot({
       fn: async (tmp) => {
-        const assetsDir = path.join(tmp, "assets");
-        await fs.mkdir(assetsDir, { recursive: true });
-        await fs.writeFile(path.join(assetsDir, "actual.txt"), "inside-ok\n");
-        await fs.symlink(path.join(assetsDir, "actual.txt"), path.join(assetsDir, "linked.txt"));
+        const { assetsDir, filePath } = await writeAssetFile(tmp, "actual.txt", "inside-ok\n");
+        await fs.symlink(filePath, path.join(assetsDir, "linked.txt"));
 
-        const { res, end } = makeMockHttpResponse();
-        const handled = handleControlUiHttpRequest(
-          { url: "/assets/linked.txt", method: "GET" } as IncomingMessage,
-          res,
-          {
-            root: { kind: "resolved", path: tmp },
-          },
-        );
+        const { res, end, handled } = runControlUiRequest({
+          url: "/assets/linked.txt",
+          method: "GET",
+          rootPath: tmp,
+        });
 
         expect(handled).toBe(true);
         expect(res.statusCode).toBe(200);
@@ -183,18 +228,13 @@ describe("handleControlUiHttpRequest", () => {
   it("serves HEAD for in-root assets without writing a body", async () => {
     await withControlUiRoot({
       fn: async (tmp) => {
-        const assetsDir = path.join(tmp, "assets");
-        await fs.mkdir(assetsDir, { recursive: true });
-        await fs.writeFile(path.join(assetsDir, "actual.txt"), "inside-ok\n");
+        await writeAssetFile(tmp, "actual.txt", "inside-ok\n");
 
-        const { res, end } = makeMockHttpResponse();
-        const handled = handleControlUiHttpRequest(
-          { url: "/assets/actual.txt", method: "HEAD" } as IncomingMessage,
-          res,
-          {
-            root: { kind: "resolved", path: tmp },
-          },
-        );
+        const { res, end, handled } = runControlUiRequest({
+          url: "/assets/actual.txt",
+          method: "HEAD",
+          rootPath: tmp,
+        });
 
         expect(handled).toBe(true);
         expect(res.statusCode).toBe(200);
@@ -213,18 +253,12 @@ describe("handleControlUiHttpRequest", () => {
           await fs.rm(path.join(tmp, "index.html"));
           await fs.symlink(outsideIndex, path.join(tmp, "index.html"));
 
-          const { res, end } = makeMockHttpResponse();
-          const handled = handleControlUiHttpRequest(
-            { url: "/app/route", method: "GET" } as IncomingMessage,
-            res,
-            {
-              root: { kind: "resolved", path: tmp },
-            },
-          );
-
-          expect(handled).toBe(true);
-          expect(res.statusCode).toBe(404);
-          expect(end).toHaveBeenCalledWith("Not Found");
+          const { res, end, handled } = runControlUiRequest({
+            url: "/app/route",
+            method: "GET",
+            rootPath: tmp,
+          });
+          expectNotFoundResponse({ handled, res, end });
         } finally {
           await fs.rm(outsideDir, { recursive: true, force: true });
         }
@@ -233,73 +267,51 @@ describe("handleControlUiHttpRequest", () => {
   });
 
   it("rejects absolute-path escape attempts under basePath routes", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-ui-root-"));
-    try {
-      const root = path.join(tmp, "ui");
-      const sibling = path.join(tmp, "ui-secrets");
-      await fs.mkdir(root, { recursive: true });
-      await fs.mkdir(sibling, { recursive: true });
-      await fs.writeFile(path.join(root, "index.html"), "<html>ok</html>\n");
-      const secretPath = path.join(sibling, "secret.txt");
-      await fs.writeFile(secretPath, "sensitive-data");
+    await withBasePathRootFixture({
+      siblingDir: "ui-secrets",
+      fn: async ({ root, sibling }) => {
+        const secretPath = path.join(sibling, "secret.txt");
+        await fs.writeFile(secretPath, "sensitive-data");
 
-      const secretPathUrl = secretPath.split(path.sep).join("/");
-      const absolutePathUrl = secretPathUrl.startsWith("/") ? secretPathUrl : `/${secretPathUrl}`;
-      const { res, end } = makeMockHttpResponse();
-
-      const handled = handleControlUiHttpRequest(
-        { url: `/openclaw/${absolutePathUrl}`, method: "GET" } as IncomingMessage,
-        res,
-        {
+        const secretPathUrl = secretPath.split(path.sep).join("/");
+        const absolutePathUrl = secretPathUrl.startsWith("/") ? secretPathUrl : `/${secretPathUrl}`;
+        const { res, end, handled } = runControlUiRequest({
+          url: `/openclaw/${absolutePathUrl}`,
+          method: "GET",
+          rootPath: root,
           basePath: "/openclaw",
-          root: { kind: "resolved", path: root },
-        },
-      );
-
-      expect(handled).toBe(true);
-      expect(res.statusCode).toBe(404);
-      expect(end).toHaveBeenCalledWith("Not Found");
-    } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
-    }
+        });
+        expectNotFoundResponse({ handled, res, end });
+      },
+    });
   });
 
   it("rejects symlink escape attempts under basePath routes", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-ui-root-"));
-    try {
-      const root = path.join(tmp, "ui");
-      const sibling = path.join(tmp, "outside");
-      await fs.mkdir(path.join(root, "assets"), { recursive: true });
-      await fs.mkdir(sibling, { recursive: true });
-      await fs.writeFile(path.join(root, "index.html"), "<html>ok</html>\n");
-      const secretPath = path.join(sibling, "secret.txt");
-      await fs.writeFile(secretPath, "sensitive-data");
+    await withBasePathRootFixture({
+      siblingDir: "outside",
+      fn: async ({ root, sibling }) => {
+        await fs.mkdir(path.join(root, "assets"), { recursive: true });
+        const secretPath = path.join(sibling, "secret.txt");
+        await fs.writeFile(secretPath, "sensitive-data");
 
-      const linkPath = path.join(root, "assets", "leak.txt");
-      try {
-        await fs.symlink(secretPath, linkPath, "file");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "EPERM") {
-          return;
+        const linkPath = path.join(root, "assets", "leak.txt");
+        try {
+          await fs.symlink(secretPath, linkPath, "file");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "EPERM") {
+            return;
+          }
+          throw error;
         }
-        throw error;
-      }
 
-      const { res, end } = makeMockHttpResponse();
-      const handled = handleControlUiHttpRequest(
-        { url: "/openclaw/assets/leak.txt", method: "GET" } as IncomingMessage,
-        res,
-        {
+        const { res, end, handled } = runControlUiRequest({
+          url: "/openclaw/assets/leak.txt",
+          method: "GET",
+          rootPath: root,
           basePath: "/openclaw",
-          root: { kind: "resolved", path: root },
-        },
-      );
-
-      expect(handled).toBe(true);
-      expect(res.statusCode).toBe(404);
-      expect(end).toHaveBeenCalledWith("Not Found");
-    } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
-    }
+        });
+        expectNotFoundResponse({ handled, res, end });
+      },
+    });
   });
 });

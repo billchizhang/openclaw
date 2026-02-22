@@ -75,9 +75,9 @@ import {
 
 function matchesMessagingToolDeliveryTarget(
   target: MessagingToolSend,
-  delivery: { channel: string; to?: string; accountId?: string },
+  delivery: { channel?: string; to?: string; accountId?: string },
 ): boolean {
-  if (!delivery.to || !target.to) {
+  if (!delivery.channel || !delivery.to || !target.to) {
     return false;
   }
   const channel = delivery.channel.trim().toLowerCase();
@@ -154,6 +154,7 @@ export async function runCronIsolatedAgentTurn(params: {
   deps: CliDeps;
   job: CronJob;
   message: string;
+  abortSignal?: AbortSignal;
   sessionKey: string;
   agentId?: string;
   lane?: string;
@@ -454,6 +455,9 @@ export async function runCronIsolatedAgentTurn(params: {
       agentDir,
       fallbacksOverride: resolveAgentModelFallbacksOverride(params.cfg, agentId),
       run: (providerOverride, modelOverride) => {
+        if (params.abortSignal?.aborted) {
+          throw new Error("cron: isolated run aborted");
+        }
         if (isCliProvider(providerOverride, cfgWithAgentDefaults)) {
           const cliSessionId = getCliSessionId(cronSession.sessionEntry, providerOverride);
           return runCliAgent({
@@ -492,6 +496,7 @@ export async function runCronIsolatedAgentTurn(params: {
           runId: cronSession.sessionEntry.sessionId,
           requireExplicitMessageTarget: true,
           disableMessageTool: deliveryRequested,
+          abortSignal: params.abortSignal,
         });
       },
     });
@@ -606,8 +611,7 @@ export async function runCronIsolatedAgentTurn(params: {
       logWarn(`[cron:${params.job.id}] ${resolvedDelivery.error.message}`);
       return withRunSession({ status: "ok", summary, outputText, ...telemetry });
     }
-    if (!resolvedDelivery.to) {
-      const message = "cron delivery target is missing";
+    const failOrWarnMissingDeliveryField = (message: string) => {
       if (!deliveryBestEffort) {
         return withRunSession({
           status: "error",
@@ -619,6 +623,12 @@ export async function runCronIsolatedAgentTurn(params: {
       }
       logWarn(`[cron:${params.job.id}] ${message}`);
       return withRunSession({ status: "ok", summary, outputText, ...telemetry });
+    };
+    if (!resolvedDelivery.channel) {
+      return failOrWarnMissingDeliveryField("cron delivery channel is missing");
+    }
+    if (!resolvedDelivery.to) {
+      return failOrWarnMissingDeliveryField("cron delivery target is missing");
     }
     const identity = resolveAgentOutboundIdentity(cfgWithAgentDefaults, agentId);
 
