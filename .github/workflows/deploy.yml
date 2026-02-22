@@ -47,4 +47,6 @@ jobs:
                   template: ./main.bicep
                   parameters: >
                       containerImage=${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+                      registryServer=${{ env.REGISTRY_NAME }}.azurecr.io
+                      registryUsername=${{ env.REGISTRY_NAME }}
                       registryPassword=${{ secrets.ACR_PASSWORD }}
