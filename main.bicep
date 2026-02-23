@@ -68,6 +68,12 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2023-05-01' = {
   // Register the File Share to the Environment so apps can use it
   resource storage 'storages@2023-05-01' = {
     name: 'openclaw-mount'
+
+    // NEW DEPENDENCY: Wait for the actual File Share to be created before registering it
+    dependsOn: [
+      fileShare
+    ]
+
     properties: {
       azureFile: {
         accountName: storageAccount.name
@@ -83,6 +89,12 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2023-05-01' = {
 resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
   name: containerAppName
   location: location
+
+  // Existing dependency: Wait for the environment storage registration
+  dependsOn: [
+    containerAppEnv::storage
+  ]
+
   properties: {
     managedEnvironmentId: containerAppEnv.id
     configuration: {
