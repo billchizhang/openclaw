@@ -50,3 +50,4 @@ jobs:
                       registryServer=${{ env.REGISTRY_NAME }}.azurecr.io
                       registryUsername=${{ env.REGISTRY_NAME }}
                       registryPassword=${{ secrets.ACR_PASSWORD }}
+                      openclawStaticToken=${{ secrets.OPENCLAW_STATIC_TOKEN }}

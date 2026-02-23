@@ -20,7 +20,11 @@ param registryUsername string
 @secure()
 param registryPassword string
 
-// 1. Log Analytics Workspace for debugging and telemetry
+@description('Your static token to lock down the OpenClaw dashboard.')
+@secure()
+param openclawStaticToken string
+
+// 1. Log Analytics Workspace
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
   name: '${environmentName}-logs'
   location: location
@@ -32,7 +36,22 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
   }
 }
 
-// 2. Container Apps Environment (The serverless cluster)
+// 2. Storage Account for Persistent Memory (Must be globally unique)
+resource storageAccount 'Microsoft.Storage/storageAccounts@2022-09-01' = {
+  name: 'openclawdata${uniqueString(resourceGroup().id)}'
+  location: location
+  sku: {
+    name: 'Standard_LRS'
+  }
+  kind: 'StorageV2'
+}
+
+// 3. Azure File Share (The "Trailer")
+resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2022-09-01' = {
+  name: '${storageAccount.name}/default/openclaw-workspace'
+}
+
+// 4. Container Apps Environment (Now linked to the File Share)
 resource containerAppEnv 'Microsoft.App/managedEnvironments@2023-05-01' = {
   name: environmentName
   location: location
@@ -45,9 +64,22 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2023-05-01' = {
       }
     }
   }
+
+  // Register the File Share to the Environment so apps can use it
+  resource storage 'storages@2023-05-01' = {
+    name: 'openclaw-mount'
+    properties: {
+      azureFile: {
+        accountName: storageAccount.name
+        accountKey: storageAccount.listKeys().keys[0].value
+        shareName: 'openclaw-workspace'
+        accessMode: 'ReadWrite'
+      }
+    }
+  }
 }
 
-// 3. The OpenClaw Gateway Container App
+// 5. The OpenClaw Gateway Container App
 resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
   name: containerAppName
   location: location
@@ -55,38 +87,64 @@ resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
     managedEnvironmentId: containerAppEnv.id
     configuration: {
       ingress: {
-        external: true // Exposes the Gateway to the internet for Webhooks/Web UI
+        external: true
         targetPort: 18789
       }
-      // Register the secret securely so it doesn't show in plaintext logs
       secrets: [
         {
           name: 'acr-password'
           value: registryPassword
         }
+        {
+          name: 'gateway-token'
+          value: openclawStaticToken
+        }
       ]
-      // Authenticate to your private registry
       registries: [
         {
           server: registryServer
           username: registryUsername
-          passwordSecretRef: 'acr-password' // References the secret defined above
+          passwordSecretRef: 'acr-password'
         }
       ]
     }
     template: {
+      // Define the volume using the environment's storage link
+      volumes: [
+        {
+          name: 'openclaw-volume'
+          storageType: 'AzureFile'
+          storageName: 'openclaw-mount'
+        }
+      ]
       containers: [
         {
           name: 'openclaw-core'
-          image: containerImage // Dynamically provided by GitHub Actions
+          image: containerImage
+          // Correct Node.js command override to prevent crashing and bind to Azure's network
+          command: [
+            'node'
+            'openclaw.mjs'
+            'gateway'
+            '--allow-unconfigured'
+            '--bind'
+            'lan'
+          ]
           env: [
             {
-              name: 'GATEWAY_BIND_MODE'
-              value: 'cloud'
+              name: 'OPENCLAW_GATEWAY_AUTH_TOKEN'
+              secretRef: 'gateway-token'
             }
             {
-              name: 'GATEWAY_PORT'
-              value: '18789'
+              name: 'OPENCLAW_GATEWAY_TRUSTED_PROXIES'
+              value: '*'
+            }
+          ]
+          // Physically plug the File Share into the container's memory folder
+          volumeMounts: [
+            {
+              volumeName: 'openclaw-volume'
+              mountPath: '/home/node/.openclaw'
             }
           ]
           resources: {
@@ -96,8 +154,6 @@ resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
         }
       ]
       scale: {
-        // Keeping replicas locked to 1 ensures OpenClaw's local memory 
-        // doesn't fragment across multiple container instances.
         minReplicas: 1
         maxReplicas: 1
       }
