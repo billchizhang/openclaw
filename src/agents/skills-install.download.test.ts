@@ -1,8 +1,9 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import JSZip from "jszip";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { withTempWorkspace, writeDownloadSkill } from "./skills-install.download-test-utils.js";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createTempHomeEnv } from "../test-utils/temp-home.js";
+import { setTempStateDir, writeDownloadSkill } from "./skills-install.download-test-utils.js";
 import { installSkill } from "./skills-install.js";
 
 const runCommandWithTimeoutMock = vi.fn();
@@ -34,23 +35,18 @@ async function fileExists(filePath: string): Promise<boolean> {
   }
 }
 
-async function createZipBuffer(
-  entries: Array<{ name: string; contents: string }>,
-): Promise<Buffer> {
-  const zip = new JSZip();
-  for (const entry of entries) {
-    zip.file(entry.name, entry.contents);
-  }
-  return zip.generateAsync({ type: "nodebuffer" });
-}
-
-const SAFE_ZIP_BUFFER_PROMISE = createZipBuffer([{ name: "hello.txt", contents: "hi" }]);
-const STRIP_COMPONENTS_ZIP_BUFFER_PROMISE = createZipBuffer([
-  { name: "package/hello.txt", contents: "hi" },
-]);
-const ZIP_SLIP_BUFFER_PROMISE = createZipBuffer([
-  { name: "../outside-write/pwned.txt", contents: "pwnd" },
-]);
+const SAFE_ZIP_BUFFER = Buffer.from(
+  "UEsDBAoAAAAAAMOJVlysKpPYAgAAAAIAAAAJAAAAaGVsbG8udHh0aGlQSwECFAAKAAAAAADDiVZcrCqT2AIAAAACAAAACQAAAAAAAAAAAAAAAAAAAAAAaGVsbG8udHh0UEsFBgAAAAABAAEANwAAACkAAAAAAA==",
+  "base64",
+);
+const STRIP_COMPONENTS_ZIP_BUFFER = Buffer.from(
+  "UEsDBAoAAAAAAMOJVlwAAAAAAAAAAAAAAAAIAAAAcGFja2FnZS9QSwMECgAAAAAAw4lWXKwqk9gCAAAAAgAAABEAAABwYWNrYWdlL2hlbGxvLnR4dGhpUEsBAhQACgAAAAAAw4lWXAAAAAAAAAAAAAAAAAgAAAAAAAAAAAAQAAAAAAAAAHBhY2thZ2UvUEsBAhQACgAAAAAAw4lWXKwqk9gCAAAAAgAAABEAAAAAAAAAAAAAAAAAJgAAAHBhY2thZ2UvaGVsbG8udHh0UEsFBgAAAAACAAIAdQAAAFcAAAAAAA==",
+  "base64",
+);
+const ZIP_SLIP_BUFFER = Buffer.from(
+  "UEsDBAoAAAAAAMOJVlwAAAAAAAAAAAAAAAADAAAALi4vUEsDBAoAAAAAAMOJVlwAAAAAAAAAAAAAAAARAAAALi4vb3V0c2lkZS13cml0ZS9QSwMECgAAAAAAw4lWXD3iZKoEAAAABAAAABoAAAAuLi9vdXRzaWRlLXdyaXRlL3B3bmVkLnR4dHB3bmRQSwECFAAKAAAAAADDiVZcAAAAAAAAAAAAAAAAAwAAAAAAAAAAABAAAAAAAAAALi4vUEsBAhQACgAAAAAAw4lWXAAAAAAAAAAAAAAAABEAAAAAAAAAAAAQAAAAIQAAAC4uL291dHNpZGUtd3JpdGUvUEsBAhQACgAAAAAAw4lWXD3iZKoEAAAABAAAABoAAAAAAAAAAAAAAAAAUAAAAC4uL291dHNpZGUtd3JpdGUvcHduZWQudHh0UEsFBgAAAAADAAMAuAAAAIwAAAAAAA==",
+  "base64",
+);
 const TAR_GZ_TRAVERSAL_BUFFER = Buffer.from(
   // Prebuilt archive containing ../outside-write/pwned.txt.
   "H4sIAK4xm2kAA+2VvU7DMBDH3UoIUWaYLXbcS5PYZegQEKhBRUBbIT4GZBpXCqJNSFySlSdgZed1eCgcUvFRaMsQgVD9k05nW3eWz8nfR0g1GMnY98RmEvlSVMllmAyFR2QqUUEAALUsnHlG7VcPtXwO+djEhm1YlJpAbYrBYAYDhKGoA8xiFEseqaPEUvihkGJanArr92fsk5eC3/x/YWl9GZUROuA9fNjBp3hMtoZWlNWU3SrL5k8/29LpdtvjYZbxqGx1IqT0vr7WCwaEh+GNIGEU3IkhH/YEKpXRxv3FQznsPxdQpGYaZFL/RzxtCu6JqFrYOzBX/wZ81n8NmEERTosocB4Lrn8T8ED6A9EwmHp0Wd1idQK2ZVIAm1ZshlvuttPeabonuyTlUkbkO7k2nGPXcYO9q+tkPzmPk4q1hTsqqXU2K+mDxit/fQ+Lyhf9F9795+tf/WoT/Z8yi+n+/xuoz+1p8Wk0Gs3i8QJSs3VlABAAAA==",
@@ -58,8 +54,9 @@ const TAR_GZ_TRAVERSAL_BUFFER = Buffer.from(
 );
 
 function mockArchiveResponse(buffer: Uint8Array): void {
+  const blobPart = Uint8Array.from(buffer);
   fetchWithSsrFGuardMock.mockResolvedValue({
-    response: new Response(new Blob([buffer]), { status: 200 }),
+    response: new Response(new Blob([blobPart]), { status: 200 }),
     release: async () => undefined,
   });
 }
@@ -98,9 +95,8 @@ function mockTarExtractionFlow(params: {
   });
 }
 
-async function seedZipDownloadResponse() {
-  const buffer = await SAFE_ZIP_BUFFER_PROMISE;
-  mockArchiveResponse(new Uint8Array(buffer));
+function seedZipDownloadResponse() {
+  mockArchiveResponse(new Uint8Array(SAFE_ZIP_BUFFER));
 }
 
 async function installZipDownloadSkill(params: {
@@ -109,7 +105,7 @@ async function installZipDownloadSkill(params: {
   targetDir: string;
 }) {
   const url = "https://example.invalid/good.zip";
-  await seedZipDownloadResponse();
+  seedZipDownloadResponse();
   await writeDownloadSkill({
     workspaceDir: params.workspaceDir,
     name: params.name,
@@ -147,10 +143,34 @@ async function writeTarBz2Skill(params: {
   });
 }
 
-beforeEach(() => {
-  runCommandWithTimeoutMock.mockClear();
-  scanDirectoryWithSummaryMock.mockClear();
-  fetchWithSsrFGuardMock.mockClear();
+let workspaceDir = "";
+let stateDir = "";
+let restoreTempHome: (() => Promise<void>) | null = null;
+
+beforeAll(async () => {
+  const tempHome = await createTempHomeEnv("openclaw-skills-install-home-");
+  restoreTempHome = () => tempHome.restore();
+  workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-skills-install-"));
+  stateDir = setTempStateDir(workspaceDir);
+});
+
+afterAll(async () => {
+  if (workspaceDir) {
+    await fs.rm(workspaceDir, { recursive: true, force: true }).catch(() => undefined);
+    workspaceDir = "";
+    stateDir = "";
+  }
+  if (restoreTempHome) {
+    await restoreTempHome();
+    restoreTempHome = null;
+  }
+});
+
+beforeEach(async () => {
+  runCommandWithTimeoutMock.mockReset();
+  runCommandWithTimeoutMock.mockResolvedValue(runCommandResult());
+  scanDirectoryWithSummaryMock.mockReset();
+  fetchWithSsrFGuardMock.mockReset();
   scanDirectoryWithSummaryMock.mockResolvedValue({
     scannedFiles: 0,
     critical: 0,
@@ -161,248 +181,180 @@ beforeEach(() => {
 });
 
 describe("installSkill download extraction safety", () => {
-  it("rejects zip slip traversal", async () => {
-    await withTempWorkspace(async ({ workspaceDir, stateDir }) => {
-      const targetDir = path.join(stateDir, "tools", "zip-slip", "target");
-      const outsideWriteDir = path.join(workspaceDir, "outside-write");
-      const outsideWritePath = path.join(outsideWriteDir, "pwned.txt");
-      const url = "https://example.invalid/evil.zip";
-
-      const buffer = await ZIP_SLIP_BUFFER_PROMISE;
-      mockArchiveResponse(new Uint8Array(buffer));
-
-      await writeDownloadSkill({
-        workspaceDir,
+  it("rejects archive traversal writes outside targetDir", async () => {
+    for (const testCase of [
+      {
+        label: "zip-slip",
         name: "zip-slip",
-        installId: "dl",
-        url,
-        archive: "zip",
-        targetDir,
-      });
-
-      const result = await installSkill({ workspaceDir, skillName: "zip-slip", installId: "dl" });
-      expect(result.ok).toBe(false);
-      expect(await fileExists(outsideWritePath)).toBe(false);
-    });
-  });
-
-  it("rejects tar.gz traversal", async () => {
-    await withTempWorkspace(async ({ workspaceDir, stateDir }) => {
-      const targetDir = path.join(stateDir, "tools", "tar-slip", "target");
-      const outsideWritePath = path.join(workspaceDir, "outside-write", "pwned.txt");
-      const url = "https://example.invalid/evil";
-      mockArchiveResponse(new Uint8Array(TAR_GZ_TRAVERSAL_BUFFER));
-
-      await writeDownloadSkill({
-        workspaceDir,
+        url: "https://example.invalid/evil.zip",
+        archive: "zip" as const,
+        buffer: ZIP_SLIP_BUFFER,
+      },
+      {
+        label: "tar-slip",
         name: "tar-slip",
-        installId: "dl",
-        url,
-        archive: "tar.gz",
-        targetDir,
-      });
+        url: "https://example.invalid/evil",
+        archive: "tar.gz" as const,
+        buffer: TAR_GZ_TRAVERSAL_BUFFER,
+      },
+    ]) {
+      const targetDir = path.join(stateDir, "tools", testCase.name, "target");
+      const outsideWritePath = path.join(workspaceDir, "outside-write", "pwned.txt");
 
-      const result = await installSkill({ workspaceDir, skillName: "tar-slip", installId: "dl" });
-      expect(result.ok).toBe(false);
-      expect(await fileExists(outsideWritePath)).toBe(false);
-    });
-  });
-
-  it("extracts zip with stripComponents safely", async () => {
-    await withTempWorkspace(async ({ workspaceDir, stateDir }) => {
-      const targetDir = path.join(stateDir, "tools", "zip-good", "target");
-      const url = "https://example.invalid/good.zip";
-
-      const buffer = await STRIP_COMPONENTS_ZIP_BUFFER_PROMISE;
-      mockArchiveResponse(new Uint8Array(buffer));
-
+      mockArchiveResponse(new Uint8Array(testCase.buffer));
       await writeDownloadSkill({
         workspaceDir,
-        name: "zip-good",
+        name: testCase.name,
         installId: "dl",
-        url,
-        archive: "zip",
-        stripComponents: 1,
-        targetDir,
-      });
-
-      const result = await installSkill({ workspaceDir, skillName: "zip-good", installId: "dl" });
-      expect(result.ok).toBe(true);
-      expect(await fs.readFile(path.join(targetDir, "hello.txt"), "utf-8")).toBe("hi");
-    });
-  });
-
-  it("rejects targetDir outside the per-skill tools root", async () => {
-    await withTempWorkspace(async ({ workspaceDir, stateDir }) => {
-      const targetDir = path.join(workspaceDir, "outside");
-      const url = "https://example.invalid/good.zip";
-
-      const buffer = await SAFE_ZIP_BUFFER_PROMISE;
-      mockArchiveResponse(new Uint8Array(buffer));
-
-      await writeDownloadSkill({
-        workspaceDir,
-        name: "targetdir-escape",
-        installId: "dl",
-        url,
-        archive: "zip",
+        url: testCase.url,
+        archive: testCase.archive,
         targetDir,
       });
 
       const result = await installSkill({
         workspaceDir,
-        skillName: "targetdir-escape",
+        skillName: testCase.name,
+        installId: "dl",
+      });
+      expect(result.ok, testCase.label).toBe(false);
+      expect(await fileExists(outsideWritePath), testCase.label).toBe(false);
+    }
+  });
+
+  it("extracts zip with stripComponents safely", async () => {
+    const targetDir = path.join(stateDir, "tools", "zip-good", "target");
+    const url = "https://example.invalid/good.zip";
+
+    mockArchiveResponse(new Uint8Array(STRIP_COMPONENTS_ZIP_BUFFER));
+
+    await writeDownloadSkill({
+      workspaceDir,
+      name: "zip-good",
+      installId: "dl",
+      url,
+      archive: "zip",
+      stripComponents: 1,
+      targetDir,
+    });
+
+    const result = await installSkill({ workspaceDir, skillName: "zip-good", installId: "dl" });
+    expect(result.ok).toBe(true);
+    expect(await fs.readFile(path.join(targetDir, "hello.txt"), "utf-8")).toBe("hi");
+  });
+
+  it("rejects targetDir escapes outside the per-skill tools root", async () => {
+    for (const testCase of [{ name: "relative-traversal", targetDir: "../outside" }]) {
+      mockArchiveResponse(new Uint8Array(SAFE_ZIP_BUFFER));
+      await writeDownloadSkill({
+        workspaceDir,
+        name: testCase.name,
+        installId: "dl",
+        url: "https://example.invalid/good.zip",
+        archive: "zip",
+        targetDir: testCase.targetDir,
+      });
+      const beforeFetchCalls = fetchWithSsrFGuardMock.mock.calls.length;
+      const result = await installSkill({
+        workspaceDir,
+        skillName: testCase.name,
         installId: "dl",
       });
       expect(result.ok).toBe(false);
       expect(result.stderr).toContain("Refusing to install outside the skill tools directory");
-      expect(fetchWithSsrFGuardMock.mock.calls.length).toBe(0);
+      expect(fetchWithSsrFGuardMock.mock.calls.length).toBe(beforeFetchCalls);
+    }
 
-      expect(stateDir.length).toBeGreaterThan(0);
-    });
+    expect(stateDir.length).toBeGreaterThan(0);
   });
 
   it("allows relative targetDir inside the per-skill tools root", async () => {
-    await withTempWorkspace(async ({ workspaceDir, stateDir }) => {
-      const result = await installZipDownloadSkill({
-        workspaceDir,
-        name: "relative-targetdir",
-        targetDir: "runtime",
-      });
-      expect(result.ok).toBe(true);
-      expect(
-        await fs.readFile(
-          path.join(stateDir, "tools", "relative-targetdir", "runtime", "hello.txt"),
-          "utf-8",
-        ),
-      ).toBe("hi");
+    const result = await installZipDownloadSkill({
+      workspaceDir,
+      name: "relative-targetdir",
+      targetDir: "runtime",
     });
-  });
-
-  it("rejects relative targetDir traversal", async () => {
-    await withTempWorkspace(async ({ workspaceDir }) => {
-      const result = await installZipDownloadSkill({
-        workspaceDir,
-        name: "relative-traversal",
-        targetDir: "../outside",
-      });
-      expect(result.ok).toBe(false);
-      expect(result.stderr).toContain("Refusing to install outside the skill tools directory");
-      expect(fetchWithSsrFGuardMock.mock.calls.length).toBe(0);
-    });
+    expect(result.ok).toBe(true);
+    expect(
+      await fs.readFile(
+        path.join(stateDir, "tools", "relative-targetdir", "runtime", "hello.txt"),
+        "utf-8",
+      ),
+    ).toBe("hi");
   });
 });
 
 describe("installSkill download extraction safety (tar.bz2)", () => {
-  it("rejects tar.bz2 traversal before extraction", async () => {
-    await withTempWorkspace(async ({ workspaceDir, stateDir }) => {
-      const url = "https://example.invalid/evil.tbz2";
-
-      mockArchiveResponse(new Uint8Array([1, 2, 3]));
-      mockTarExtractionFlow({
-        listOutput: "../outside.txt\n",
-        verboseListOutput: "-rw-r--r--  0 0 0 0 Jan  1 00:00 ../outside.txt\n",
-        extract: "reject",
-      });
-
-      await writeTarBz2Skill({
-        workspaceDir,
-        stateDir,
-        name: "tbz2-slip",
-        url,
-      });
-
-      const result = await installSkill({ workspaceDir, skillName: "tbz2-slip", installId: "dl" });
-      expect(result.ok).toBe(false);
-      expect(
-        runCommandWithTimeoutMock.mock.calls.some((call) => (call[0] as string[])[1] === "xf"),
-      ).toBe(false);
-    });
-  });
-
-  it("rejects tar.bz2 archives containing symlinks", async () => {
-    await withTempWorkspace(async ({ workspaceDir, stateDir }) => {
-      const url = "https://example.invalid/evil.tbz2";
-
-      mockArchiveResponse(new Uint8Array([1, 2, 3]));
-      mockTarExtractionFlow({
+  it("handles tar.bz2 extraction safety edge-cases", async () => {
+    for (const testCase of [
+      {
+        label: "rejects archives containing symlinks",
+        name: "tbz2-symlink",
+        url: "https://example.invalid/evil.tbz2",
         listOutput: "link\nlink/pwned.txt\n",
         verboseListOutput: "lrwxr-xr-x  0 0 0 0 Jan  1 00:00 link -> ../outside\n",
-        extract: "reject",
-      });
-
-      await writeTarBz2Skill({
-        workspaceDir,
-        stateDir,
-        name: "tbz2-symlink",
-        url,
-      });
-
-      const result = await installSkill({
-        workspaceDir,
-        skillName: "tbz2-symlink",
-        installId: "dl",
-      });
-      expect(result.ok).toBe(false);
-      expect(result.stderr.toLowerCase()).toContain("link");
-    });
-  });
-
-  it("extracts tar.bz2 with stripComponents safely (preflight only)", async () => {
-    await withTempWorkspace(async ({ workspaceDir, stateDir }) => {
-      const url = "https://example.invalid/good.tbz2";
-
-      mockArchiveResponse(new Uint8Array([1, 2, 3]));
-      mockTarExtractionFlow({
+        extract: "reject" as const,
+        expectedOk: false,
+        expectedExtract: false,
+        expectedStderrSubstring: "link",
+      },
+      {
+        label: "extracts safe archives with stripComponents",
+        name: "tbz2-ok",
+        url: "https://example.invalid/good.tbz2",
         listOutput: "package/hello.txt\n",
         verboseListOutput: "-rw-r--r--  0 0 0 0 Jan  1 00:00 package/hello.txt\n",
-        extract: "ok",
-      });
-
-      await writeTarBz2Skill({
-        workspaceDir,
-        stateDir,
-        name: "tbz2-ok",
-        url,
         stripComponents: 1,
-      });
-
-      const result = await installSkill({ workspaceDir, skillName: "tbz2-ok", installId: "dl" });
-      expect(result.ok).toBe(true);
-      expect(
-        runCommandWithTimeoutMock.mock.calls.some((call) => (call[0] as string[])[1] === "xf"),
-      ).toBe(true);
-    });
-  });
-
-  it("rejects tar.bz2 stripComponents escape", async () => {
-    await withTempWorkspace(async ({ workspaceDir, stateDir }) => {
-      const url = "https://example.invalid/evil.tbz2";
-
-      mockArchiveResponse(new Uint8Array([1, 2, 3]));
-      mockTarExtractionFlow({
+        extract: "ok" as const,
+        expectedOk: true,
+        expectedExtract: true,
+      },
+      {
+        label: "rejects stripComponents escapes",
+        name: "tbz2-strip-escape",
+        url: "https://example.invalid/evil.tbz2",
         listOutput: "a/../b.txt\n",
         verboseListOutput: "-rw-r--r--  0 0 0 0 Jan  1 00:00 a/../b.txt\n",
-        extract: "reject",
+        stripComponents: 1,
+        extract: "reject" as const,
+        expectedOk: false,
+        expectedExtract: false,
+      },
+    ]) {
+      const commandCallCount = runCommandWithTimeoutMock.mock.calls.length;
+      mockArchiveResponse(new Uint8Array([1, 2, 3]));
+      mockTarExtractionFlow({
+        listOutput: testCase.listOutput,
+        verboseListOutput: testCase.verboseListOutput,
+        extract: testCase.extract,
       });
 
       await writeTarBz2Skill({
         workspaceDir,
         stateDir,
-        name: "tbz2-strip-escape",
-        url,
-        stripComponents: 1,
+        name: testCase.name,
+        url: testCase.url,
+        ...(typeof testCase.stripComponents === "number"
+          ? { stripComponents: testCase.stripComponents }
+          : {}),
       });
 
       const result = await installSkill({
         workspaceDir,
-        skillName: "tbz2-strip-escape",
+        skillName: testCase.name,
         installId: "dl",
       });
-      expect(result.ok).toBe(false);
-      expect(
-        runCommandWithTimeoutMock.mock.calls.some((call) => (call[0] as string[])[1] === "xf"),
-      ).toBe(false);
-    });
+      expect(result.ok, testCase.label).toBe(testCase.expectedOk);
+
+      const extractionAttempted = runCommandWithTimeoutMock.mock.calls
+        .slice(commandCallCount)
+        .some((call) => (call[0] as string[])[1] === "xf");
+      expect(extractionAttempted, testCase.label).toBe(testCase.expectedExtract);
+
+      if (typeof testCase.expectedStderrSubstring === "string") {
+        expect(result.stderr.toLowerCase(), testCase.label).toContain(
+          testCase.expectedStderrSubstring,
+        );
+      }
+    }
   });
 });
