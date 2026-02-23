@@ -38,7 +38,7 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
 
 // 2. Storage Account for Persistent Memory (Must be globally unique)
 resource storageAccount 'Microsoft.Storage/storageAccounts@2022-09-01' = {
-  name: 'openclawdata${uniqueString(resourceGroup().id)}'
+  name: 'ocdata${uniqueString(resourceGroup().id)}'
   location: location
   sku: {
     name: 'Standard_LRS'
