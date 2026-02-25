@@ -143,13 +143,7 @@ resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
           name: 'openclaw-core'
           image: containerImage
           command: [
-            'node'
-            'openclaw.mjs'
-            'gateway'
-            '--allow-unconfigured'
-            '--bind'
-            'lan'
-            'sh'
+            '/bin/sh'
             '-c'
             '''
             cat << 'EOF' > /tmp/patch.js
