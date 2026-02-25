@@ -144,6 +144,8 @@ resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
           image: containerImage
           command: [
             '/bin/sh'
+          ]
+          args: [
             '-c'
             '''
             cat << 'EOF' > /tmp/patch.js
