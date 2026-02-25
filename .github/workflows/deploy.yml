@@ -51,3 +51,5 @@ jobs:
                       registryUsername=${{ env.REGISTRY_NAME }}
                       registryPassword=${{ secrets.ACR_PASSWORD }}
                       openclawStaticToken=${{ secrets.OPENCLAW_STATIC_TOKEN }}
+                      openAiApiKey=${{ secrets.OPENAI_API_KEY }}
+                      anthropicApiKey=${{ secrets.ANTHROPIC_API_KEY }}

@@ -24,6 +24,14 @@ param registryPassword string
 @secure()
 param openclawStaticToken string
 
+@description('OpenAI API Key for the execution model')
+@secure()
+param openAiApiKey string
+
+@description('Anthropic API Key for the reasoning model')
+@secure()
+param anthropicApiKey string
+
 // 1. Log Analytics Workspace
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
   name: '${environmentName}-logs'
@@ -36,7 +44,7 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
   }
 }
 
-// 2. Storage Account for Persistent Memory (Must be globally unique)
+// 2. Storage Account for Persistent Memory
 resource storageAccount 'Microsoft.Storage/storageAccounts@2022-09-01' = {
   name: 'ocdata${uniqueString(resourceGroup().id)}'
   location: location
@@ -51,7 +59,7 @@ resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2022-0
   name: '${storageAccount.name}/default/openclaw-workspace'
 }
 
-// 4. Container Apps Environment (Now linked to the File Share)
+// 4. Container Apps Environment
 resource containerAppEnv 'Microsoft.App/managedEnvironments@2023-05-01' = {
   name: environmentName
   location: location
@@ -65,15 +73,12 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2023-05-01' = {
     }
   }
 
-  // Register the File Share to the Environment so apps can use it
+  // Register the File Share to the Environment
   resource storage 'storages@2023-05-01' = {
     name: 'openclaw-mount'
-
-    // NEW DEPENDENCY: Wait for the actual File Share to be created before registering it
     dependsOn: [
-      fileShare
+      fileShare // Prevents the race condition
     ]
-
     properties: {
       azureFile: {
         accountName: storageAccount.name
@@ -89,12 +94,9 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2023-05-01' = {
 resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
   name: containerAppName
   location: location
-
-  // Existing dependency: Wait for the environment storage registration
   dependsOn: [
     containerAppEnv::storage
   ]
-
   properties: {
     managedEnvironmentId: containerAppEnv.id
     configuration: {
@@ -111,6 +113,14 @@ resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
           name: 'gateway-token'
           value: openclawStaticToken
         }
+        {
+          name: 'openai-api-key'
+          value: openAiApiKey
+        }
+        {
+          name: 'anthropic-api-key'
+          value: anthropicApiKey
+        }
       ]
       registries: [
         {
@@ -121,7 +131,6 @@ resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
       ]
     }
     template: {
-      // Define the volume using the environment's storage link
       volumes: [
         {
           name: 'openclaw-volume'
@@ -133,7 +142,6 @@ resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
         {
           name: 'openclaw-core'
           image: containerImage
-          // Correct Node.js command override to prevent crashing and bind to Azure's network
           command: [
             'node'
             'openclaw.mjs'
@@ -143,6 +151,7 @@ resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
             'lan'
           ]
           env: [
+            // Core Security
             {
               name: 'OPENCLAW_GATEWAY_AUTH_TOKEN'
               secretRef: 'gateway-token'
@@ -151,8 +160,31 @@ resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
               name: 'OPENCLAW_GATEWAY_TRUSTED_PROXIES'
               value: '*'
             }
+            {
+              name: 'OPENCLAW_CONTROL_UI_ALLOW_INSECURE_AUTH'
+              value: 'true' // Bypasses the device pairing waiting room
+            }
+
+            // LLM API Keys
+            {
+              name: 'OPENAI_API_KEY'
+              secretRef: 'openai-api-key'
+            }
+            {
+              name: 'ANTHROPIC_API_KEY'
+              secretRef: 'anthropic-api-key'
+            }
+
+            // Model Routing Assignments
+            {
+              name: 'OPENCLAW_AGENTS_DEFAULTS_MODEL_PRIMARY'
+              value: 'anthropic/claude-opus-4-6' // Deep Thinking Brain
+            }
+            {
+              name: 'OPENCLAW_AGENTS_DEFAULTS_MODEL_FAST'
+              value: 'openai/gpt-5-mini' // Fast Execution Brain
+            }
           ]
-          // Physically plug the File Share into the container's memory folder
           volumeMounts: [
             {
               volumeName: 'openclaw-volume'
