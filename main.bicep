@@ -151,7 +151,17 @@ resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
             'lan'
             'sh'
             '-c'
-            'echo "const fs=require(\'fs\');[\'chmod\',\'fchmod\',\'chown\',\'fchown\'].forEach(f=>{fs[f]=(...a)=>{const c=a.pop();if(typeof c===\'function\')c(null)};fs[f+\'Sync\']=()=>{};if(fs.promises&&fs.promises[f])fs.promises[f]=async()=>{};});" > /tmp/patch.js && node --require /tmp/patch.js openclaw.mjs gateway --allow-unconfigured --bind lan'
+            '''
+            cat << 'EOF' > /tmp/patch.js
+            const fs = require('fs');
+            ['chmod', 'fchmod', 'chown', 'fchown'].forEach(f => {
+              fs[f] = (...args) => { const cb = args.pop(); if (typeof cb === 'function') cb(null); };
+              fs[f + 'Sync'] = () => {};
+              if (fs.promises && fs.promises[f]) fs.promises[f] = async () => {};
+            });
+            EOF
+            exec node --require /tmp/patch.js openclaw.mjs gateway --allow-unconfigured --bind lan
+            '''
           ]
           env: [
             // Core Security
