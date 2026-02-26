@@ -10,6 +10,7 @@ env:
     REGISTRY_NAME: asireonclaw
     IMAGE_NAME: openclaw
     RESOURCE_GROUP: asireon-claw
+    APP_NAME: openclaw-gateway
 
 jobs:
     build-and-deploy:
@@ -18,6 +19,8 @@ jobs:
             # 1. Pull down your forked OpenClaw code
             - name: Checkout repository
               uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0 # Required to accurately detect changed files from previous commits
 
             # 2. Authenticate securely with Azure
             - name: Log in to Azure
@@ -33,20 +36,46 @@ jobs:
                   username: ${{ env.REGISTRY_NAME }}
                   password: ${{ secrets.ACR_PASSWORD }}
 
-            # 4. Build the custom Docker image and tag it with the commit SHA
-            - name: Build and Push Docker Image
-              run: |
-                  docker build -t ${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }} .
-                  docker push ${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            # 4. Detect non-infrastructure changes
+            - name: Check for code changes
+              id: changed-files
+              uses: tj-actions/changed-files@v44
+              with:
+                  files_ignore: |
+                      main.bicep
+                      .github/workflows/deploy.yml
 
-            # 5. Execute the Bicep template to update the Container App with the new image
+            # 5. Build and push image ONLY if code changed
+            - name: Build and Push Docker Image
+              if: steps.changed-files.outputs.any_changed == 'true'
+              run: |
+                  chmod +x ./deploy.sh
+                  ./deploy.sh
+              env:
+                  REGISTRY_NAME: ${{ env.REGISTRY_NAME }}
+                  IMAGE_NAME: ${{ env.IMAGE_NAME }}
+
+            # 6. Determine the correct container image to deploy
+            - name: Get Target Image Tag
+              id: get-image
+              run: |
+                  if [[ "${{ steps.changed-files.outputs.any_changed }}" == "true" ]]; then
+                      echo "Code changed. Deploying newly built image..."
+                      echo "image=${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}" >> $GITHUB_OUTPUT
+                  else
+                      echo "Only infrastructure changed. Reusing current container image..."
+                      CURRENT_IMAGE=$(az containerapp show --name ${{ env.APP_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} --query properties.template.containers[0].image -o tsv)
+                      echo "image=${CURRENT_IMAGE}" >> $GITHUB_OUTPUT
+                  fi
+
+            # 7. Execute the Bicep template (always runs)
             - name: Deploy Infrastructure and App via Bicep
               uses: azure/arm-deploy@v2
               with:
                   resourceGroupName: ${{ env.RESOURCE_GROUP }}
                   template: ./main.bicep
                   parameters: >
-                      containerImage=${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+                      containerImage=${{ steps.get-image.outputs.image }}
                       registryServer=${{ env.REGISTRY_NAME }}.azurecr.io
                       registryUsername=${{ env.REGISTRY_NAME }}
                       registryPassword=${{ secrets.ACR_PASSWORD }}
