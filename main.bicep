@@ -156,6 +156,7 @@ const fs = require('fs');
   if (fs.promises && fs.promises[f]) fs.promises[f] = async () => {};
 });
 EOF
+node --require /tmp/patch.js openclaw.mjs config set gateway.controlUi.allowedOrigins "[\"$OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS\"]"
 node --require /tmp/patch.js openclaw.mjs config set channels.whatsapp.enabled true
 exec node --require /tmp/patch.js openclaw.mjs gateway --allow-unconfigured --bind lan
             '''
