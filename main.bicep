@@ -156,7 +156,7 @@ const fs = require('fs');
   if (fs.promises && fs.promises[f]) fs.promises[f] = async () => {};
 });
 EOF
-node --require /tmp/patch.js openclaw.mjs config set gateway.trustedProxies "[\"$OPENCLAW_GATEWAY_TRUSTED_PROXIES\"]"
+node --require /tmp/patch.js openclaw.mjs config set gateway.trustedProxies '["0.0.0.0/0", "::/0"]'
 node --require /tmp/patch.js openclaw.mjs config set gateway.controlUi.allowedOrigins "[\"$OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS\"]"
 node --require /tmp/patch.js openclaw.mjs config set channels.whatsapp.enabled true
 exec node --require /tmp/patch.js openclaw.mjs gateway --allow-unconfigured --bind lan
@@ -167,10 +167,6 @@ exec node --require /tmp/patch.js openclaw.mjs gateway --allow-unconfigured --bi
             {
               name: 'OPENCLAW_GATEWAY_AUTH_TOKEN'
               secretRef: 'gateway-token'
-            }
-            {
-              name: 'OPENCLAW_GATEWAY_TRUSTED_PROXIES'
-              value: '*'
             }
             {
               name: 'OPENCLAW_CONTROL_UI_ALLOW_INSECURE_AUTH'
@@ -201,7 +197,7 @@ exec node --require /tmp/patch.js openclaw.mjs gateway --allow-unconfigured --bi
             {
               name: 'OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS'
               // Dynamically whitelist the Azure Container App's own default hostname
-              value: 'https://${containerAppEnv.properties.defaultDomain}'
+              value: 'https://${containerAppName}.${containerAppEnv.properties.defaultDomain}'
             }
           ]
           volumeMounts: [
