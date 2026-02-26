@@ -156,6 +156,8 @@ const fs = require('fs');
   if (fs.promises && fs.promises[f]) fs.promises[f] = async () => {};
 });
 EOF
+node --require /tmp/patch.js openclaw.mjs plugins enable slack
+node --require /tmp/patch.js openclaw.mjs plugins enable whatsapp
 exec node --require /tmp/patch.js openclaw.mjs gateway --allow-unconfigured --bind lan
             '''
           ]
@@ -192,6 +194,13 @@ exec node --require /tmp/patch.js openclaw.mjs gateway --allow-unconfigured --bi
             {
               name: 'OPENCLAW_AGENTS_DEFAULTS_MODEL_FAST'
               value: 'openai/gpt-5-mini' // Fast Execution Brain
+            }
+
+            // UI Origin Configuration
+            {
+              name: 'OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS'
+              // Dynamically whitelist the Azure Container App's own default hostname
+              value: 'https://${containerAppEnv.properties.defaultDomain}'
             }
           ]
           volumeMounts: [
