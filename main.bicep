@@ -156,8 +156,8 @@ const fs = require('fs');
   if (fs.promises && fs.promises[f]) fs.promises[f] = async () => {};
 });
 EOF
-node --require /tmp/patch.js openclaw.mjs plugins enable slack
-node --require /tmp/patch.js openclaw.mjs plugins enable whatsapp
+node --require /tmp/patch.js openclaw.mjs config set channels.slack.enabled true
+node --require /tmp/patch.js openclaw.mjs config set channels.whatsapp.enabled true
 exec node --require /tmp/patch.js openclaw.mjs gateway --allow-unconfigured --bind lan
             '''
           ]
