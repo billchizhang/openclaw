@@ -36,18 +36,8 @@ jobs:
                   username: ${{ env.REGISTRY_NAME }}
                   password: ${{ secrets.ACR_PASSWORD }}
 
-            # 4. Detect non-infrastructure changes
-            - name: Check for code changes
-              id: changed-files
-              uses: tj-actions/changed-files@v44
-              with:
-                  files_ignore: |
-                      main.bicep
-                      .github/workflows/deploy.yml
-
-            # 5. Build and push image ONLY if code changed
+            # 4. Build and Push Docker Image
             - name: Build and Push Docker Image
-              if: steps.changed-files.outputs.any_changed == 'true'
               run: |
                   chmod +x ./deploy.sh
                   ./deploy.sh
@@ -55,18 +45,11 @@ jobs:
                   REGISTRY_NAME: ${{ env.REGISTRY_NAME }}
                   IMAGE_NAME: ${{ env.IMAGE_NAME }}
 
-            # 6. Determine the correct container image to deploy
+            # 5. Determine the correct container image to deploy
             - name: Get Target Image Tag
               id: get-image
               run: |
-                  if [[ "${{ steps.changed-files.outputs.any_changed }}" == "true" ]]; then
-                      echo "Code changed. Deploying newly built image..."
-                      echo "image=${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}" >> $GITHUB_OUTPUT
-                  else
-                      echo "Only infrastructure changed. Reusing current container image..."
-                      CURRENT_IMAGE=$(az containerapp show --name ${{ env.APP_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} --query properties.template.containers[0].image -o tsv)
-                      echo "image=${CURRENT_IMAGE}" >> $GITHUB_OUTPUT
-                  fi
+                  echo "image=${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}" >> $GITHUB_OUTPUT
 
             # 7. Execute the Bicep template (always runs)
             - name: Deploy Infrastructure and App via Bicep
