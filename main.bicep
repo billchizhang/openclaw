@@ -32,6 +32,14 @@ param openAiApiKey string
 @secure()
 param anthropicApiKey string
 
+@description('Slack App Token (starts with xapp-) for socket mode')
+@secure()
+param slackAppToken string
+
+@description('Slack Bot Token (starts with xoxb-) for bot actions')
+@secure()
+param slackBotToken string
+
 // 1. Log Analytics Workspace
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
   name: '${environmentName}-logs'
@@ -121,6 +129,14 @@ resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
           name: 'anthropic-api-key'
           value: anthropicApiKey
         }
+        {
+          name: 'slack-app-token'
+          value: slackAppToken
+        }
+        {
+          name: 'slack-bot-token'
+          value: slackBotToken
+        }
       ]
       registries: [
         {
@@ -158,7 +174,7 @@ const fs = require('fs');
 EOF
 node --require /tmp/patch.js openclaw.mjs config set gateway.trustedProxies '["0.0.0.0/0", "::/0"]'
 node --require /tmp/patch.js openclaw.mjs config set gateway.controlUi.allowedOrigins "[\"$OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS\"]"
-node --require /tmp/patch.js openclaw.mjs config set channels.whatsapp.enabled true
+node --require /tmp/patch.js openclaw.mjs config set channels.slack.enabled true
 exec node --require /tmp/patch.js openclaw.mjs gateway --allow-unconfigured --bind lan
             '''
           ]
@@ -171,6 +187,16 @@ exec node --require /tmp/patch.js openclaw.mjs gateway --allow-unconfigured --bi
             {
               name: 'OPENCLAW_CONTROL_UI_ALLOW_INSECURE_AUTH'
               value: 'true' // Bypasses the device pairing waiting room
+            }
+
+            // Slack Integration
+            {
+              name: 'SLACK_BOT_TOKEN'
+              secretRef: 'slack-bot-token'
+            }
+            {
+              name: 'SLACK_APP_TOKEN'
+              secretRef: 'slack-app-token'
             }
 
             // LLM API Keys
