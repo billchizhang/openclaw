@@ -55,6 +55,7 @@ jobs:
             - name: Deploy Infrastructure and App via Bicep
               uses: azure/arm-deploy@v2
               with:
+                  scope: resourcegroup
                   resourceGroupName: ${{ env.RESOURCE_GROUP }}
                   template: ./main.bicep
                   parameters: >
