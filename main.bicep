@@ -175,6 +175,9 @@ EOF
 node --require /tmp/patch.js openclaw.mjs config set gateway.trustedProxies '["0.0.0.0/0", "::/0"]'
 node --require /tmp/patch.js openclaw.mjs config set gateway.controlUi.allowedOrigins "[\"$OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS\"]"
 node --require /tmp/patch.js openclaw.mjs config set channels.slack.enabled true
+node --require /tmp/patch.js openclaw.mjs config set channels.slack.dmPolicy '"open"'
+node --require /tmp/patch.js openclaw.mjs config set channels.slack.allowFrom '["*"]'
+node --require /tmp/patch.js openclaw.mjs config set channels.slack.groupPolicy '"open"'
 exec node --require /tmp/patch.js openclaw.mjs gateway --allow-unconfigured --bind lan
             '''
           ]
