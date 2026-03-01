@@ -66,5 +66,6 @@ jobs:
                       openclawStaticToken=${{ secrets.OPENCLAW_STATIC_TOKEN }}
                       openAiApiKey=${{ secrets.OPENAI_API_KEY }}
                       anthropicApiKey=${{ secrets.ANTHROPIC_API_KEY }}
+                      geminiApiKey=${{ secrets.GEMINI_API_KEY }}
                       slackAppToken=${{ secrets.SLACK_APP_TOKEN }}
                       slackBotToken=${{ secrets.SLACK_BOT_TOKEN }}

@@ -32,6 +32,10 @@ param openAiApiKey string
 @secure()
 param anthropicApiKey string
 
+@description('Gemini API Key for web search grounding')
+@secure()
+param geminiApiKey string
+
 @description('Slack App Token (starts with xapp-) for socket mode')
 @secure()
 param slackAppToken string
@@ -130,6 +134,10 @@ resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
           value: anthropicApiKey
         }
         {
+          name: 'gemini-api-key'
+          value: geminiApiKey
+        }
+        {
           name: 'slack-app-token'
           value: slackAppToken
         }
@@ -210,6 +218,10 @@ exec node --require /tmp/patch.js openclaw.mjs gateway --allow-unconfigured --bi
             {
               name: 'ANTHROPIC_API_KEY'
               secretRef: 'anthropic-api-key'
+            }
+            {
+              name: 'GEMINI_API_KEY'
+              secretRef: 'gemini-api-key'
             }
 
             // Model Routing Assignments
