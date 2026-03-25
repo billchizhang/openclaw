@@ -215,6 +215,27 @@ When you call `web_search`, the tool result JSON contains a `citations` array wi
 3. Prefer URLs from the `citations` array (they are resolved/clean URLs).
 4. If `citations` is empty, use URLs from the References section in the content.
 AGENTS_EOF
+# Pre-create SOUL.md and USER.md so the personal-assistant templates are not scaffolded.
+cat << 'SOUL_EOF' > /home/node/.openclaw/workspace/SOUL.md
+# Enterprise Assistant
+Helpful, concise, and citation-accurate. No persona or personal relationship framing.
+SOUL_EOF
+cat << 'USER_EOF' > /home/node/.openclaw/workspace/USER.md
+# Shared Enterprise Workspace
+Multi-user deployment — no single user profile.
+USER_EOF
+# Pre-create BOOTSTRAP.md (empty) so the onboarding wizard is not injected into context.
+touch /home/node/.openclaw/workspace/BOOTSTRAP.md
+# Activate memory curation: add a non-empty task to HEARTBEAT.md so the LLM call runs.
+# Without this, the heartbeat runner fires every 30m but skips the API call because the
+# default template is all markdown headers (treated as comments by isHeartbeatContentEffectivelyEmpty).
+cat << 'HEARTBEAT_EOF' > /home/node/.openclaw/workspace/HEARTBEAT.md
+# Periodic memory curation
+- Check the memory/ directory for date-stamped files (memory/YYYY-MM-DD.md) written since last curation.
+- If new entries exist, distill key facts, decisions, and patterns into MEMORY.md (create if absent).
+- Keep MEMORY.md concise: facts and decisions only, no raw transcript. Append; never overwrite existing entries.
+- If nothing new to curate, reply HEARTBEAT_OK.
+HEARTBEAT_EOF
 node --require /tmp/patch.js openclaw.mjs config set gateway.trustedProxies '["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]'
 node --require /tmp/patch.js openclaw.mjs config set gateway.controlUi.allowedOrigins "[\"$OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS\"]"
 node --require /tmp/patch.js openclaw.mjs config set channels.slack.enabled true
