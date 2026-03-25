@@ -17,6 +17,7 @@ import {
   formatAudioTranscripts,
   formatMediaUnderstandingBody,
 } from "./format.js";
+import { tryConvertOfficeFile } from "./office-convert.runtime.js";
 import { resolveConcurrency } from "./resolve.js";
 import {
   type ActiveMediaModel,
@@ -43,6 +44,7 @@ export type ApplyMediaUnderstandingResult = {
 };
 
 const CAPABILITY_ORDER: MediaUnderstandingCapability[] = ["image", "audio", "video"];
+const CONVERTIBLE_OFFICE_EXTS = new Set([".docx", ".pptx", ".xlsx"]);
 const EXTRA_TEXT_MIMES = [
   "application/xml",
   "text/xml",
@@ -360,6 +362,28 @@ async function extractFileBlocks(params: {
     const forcedTextMimeResolved = forcedTextMime ?? resolveTextMimeFromName(nameHint ?? "");
     const rawMime = bufferResult?.mime ?? attachment.mime;
     const normalizedRawMime = normalizeMimeType(rawMime);
+    // Office file conversion: .xlsx → CSV, .docx → PDF/markdown, .pptx → PDF
+    const officeExt = path.extname(nameHint ?? "").toLowerCase();
+    if (!forcedTextMimeResolved && CONVERTIBLE_OFFICE_EXTS.has(officeExt) && bufferResult.buffer) {
+      const converted = await tryConvertOfficeFile(officeExt, bufferResult.buffer);
+      if (converted) {
+        if (shouldLogVerbose()) {
+          logVerbose(
+            `media: office file converted (${officeExt} → ${converted.mime}) index=${attachment.index}`,
+          );
+        }
+        blocks.push(
+          renderFileContextBlock({
+            filename: bufferResult.fileName,
+            fallbackName: `file-${attachment.index + 1}`,
+            mimeType: converted.mime,
+            content: converted.text,
+          }),
+        );
+        continue;
+      }
+    }
+
     if (!forcedTextMimeResolved && isBinaryMediaMime(normalizedRawMime)) {
       continue;
     }
