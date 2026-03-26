@@ -1,12 +1,14 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { logDebug, logWarn } from "../logger.js";
 import { loadEmbeddedPiMcpConfig } from "./embedded-pi-mcp.js";
 import {
   describeStdioMcpServerLaunchConfig,
+  resolveHttpMcpServerConfig,
   resolveStdioMcpServerLaunchConfig,
 } from "./mcp-stdio.js";
 import type { AnyAgentTool } from "./tools/common.js";
@@ -19,7 +21,7 @@ type BundleMcpToolRuntime = {
 type BundleMcpSession = {
   serverName: string;
   client: Client;
-  transport: StdioClientTransport;
+  transport: StdioClientTransport | StreamableHTTPClientTransport;
   detachStderr?: () => void;
 };
 
@@ -144,20 +146,42 @@ export async function createBundleMcpToolRuntime(params: {
 
   try {
     for (const [serverName, rawServer] of Object.entries(loaded.mcpServers)) {
-      const launch = resolveStdioMcpServerLaunchConfig(rawServer);
-      if (!launch.ok) {
-        logWarn(`bundle-mcp: skipped server "${serverName}" because ${launch.reason}.`);
-        continue;
-      }
-      const launchConfig = launch.config;
+      let transport: StdioClientTransport | StreamableHTTPClientTransport;
+      let serverDescription: string;
+      let detachStderr: (() => void) | undefined;
 
-      const transport = new StdioClientTransport({
-        command: launchConfig.command,
-        args: launchConfig.args,
-        env: launchConfig.env,
-        cwd: launchConfig.cwd,
-        stderr: "pipe",
-      });
+      // Try HTTP transport first (URL-based config with no command).
+      const httpConfig = resolveHttpMcpServerConfig(rawServer);
+      if (httpConfig.ok) {
+        let url: URL;
+        try {
+          url = new URL(httpConfig.config.url);
+        } catch {
+          logWarn(`bundle-mcp: skipped server "${serverName}" because its url is invalid.`);
+          continue;
+        }
+        transport = new StreamableHTTPClientTransport(url);
+        serverDescription = httpConfig.config.url;
+      } else {
+        // Fall back to stdio transport.
+        const launch = resolveStdioMcpServerLaunchConfig(rawServer);
+        if (!launch.ok) {
+          logWarn(`bundle-mcp: skipped server "${serverName}" because ${launch.reason}.`);
+          continue;
+        }
+        const launchConfig = launch.config;
+        const stdioTransport = new StdioClientTransport({
+          command: launchConfig.command,
+          args: launchConfig.args,
+          env: launchConfig.env,
+          cwd: launchConfig.cwd,
+          stderr: "pipe",
+        });
+        detachStderr = attachStderrLogging(serverName, stdioTransport);
+        transport = stdioTransport;
+        serverDescription = describeStdioMcpServerLaunchConfig(launchConfig);
+      }
+
       const client = new Client(
         {
           name: "openclaw-bundle-mcp",
@@ -165,12 +189,7 @@ export async function createBundleMcpToolRuntime(params: {
         },
         {},
       );
-      const session: BundleMcpSession = {
-        serverName,
-        client,
-        transport,
-        detachStderr: attachStderrLogging(serverName, transport),
-      };
+      const session: BundleMcpSession = { serverName, client, transport, detachStderr };
 
       try {
         await client.connect(transport);
@@ -193,7 +212,7 @@ export async function createBundleMcpToolRuntime(params: {
             label: tool.title ?? tool.name,
             description:
               tool.description?.trim() ||
-              `Provided by bundle MCP server "${serverName}" (${describeStdioMcpServerLaunchConfig(launchConfig)}).`,
+              `Provided by bundle MCP server "${serverName}" (${serverDescription}).`,
             parameters: tool.inputSchema,
             execute: async (_toolCallId, input) => {
               const result = (await client.callTool({
@@ -210,7 +229,7 @@ export async function createBundleMcpToolRuntime(params: {
         }
       } catch (error) {
         logWarn(
-          `bundle-mcp: failed to start server "${serverName}" (${describeStdioMcpServerLaunchConfig(launchConfig)}): ${String(error)}`,
+          `bundle-mcp: failed to start server "${serverName}" (${serverDescription}): ${String(error)}`,
         );
         await disposeSession(session);
       }
