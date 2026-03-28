@@ -251,8 +251,8 @@ node --require /tmp/patch.js openclaw.mjs config set tools.profile full
 node --require /tmp/patch.js openclaw.mjs mcp set rag-search '{"url":"https://retrieval-mcp-server.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
 node --require /tmp/patch.js openclaw.mjs mcp set asireon-function-call '{"url":"https://asireon-func-mcp.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
 node --require /tmp/patch.js openclaw.mjs config set agents.defaults.model.primary '"anthropic/claude-opus-4-6"'
-node --require /tmp/patch.js openclaw.mjs config set agents.list[0] '{"id":"planner","model":{"primary":"anthropic/claude-opus-4-6"},"thinkingDefault":"high","subagents":{"allowAgents":["executor"]}}'
-node --require /tmp/patch.js openclaw.mjs config set agents.list[1] '{"id":"executor","model":{"primary":"openai/gpt-5-mini"},"thinkingDefault":"adaptive"}'
+node --require /tmp/patch.js openclaw.mjs config set 'agents.list[0]' '{"id":"planner","model":{"primary":"anthropic/claude-opus-4-6"},"thinkingDefault":"high","subagents":{"allowAgents":["executor"]}}'
+node --require /tmp/patch.js openclaw.mjs config set 'agents.list[1]' '{"id":"executor","model":{"primary":"openai/gpt-5-mini"},"thinkingDefault":"adaptive"}'
 mkdir -p /home/node/.openclaw/workspace-planner
 touch /home/node/.openclaw/workspace-planner/BOOTSTRAP.md
 cat << 'PLANNER_EOF' > /home/node/.openclaw/workspace-planner/AGENTS.md
