@@ -236,6 +236,11 @@ cat << 'HEARTBEAT_EOF' > /home/node/.openclaw/workspace/HEARTBEAT.md
 - Keep MEMORY.md concise: facts and decisions only, no raw transcript. Append; never overwrite existing entries.
 - If nothing new to curate, reply HEARTBEAT_OK.
 HEARTBEAT_EOF
+node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.model '"anthropic/claude-haiku-4-5"'
+node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.isolatedSession true
+node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.lightContext true
+node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.every '"12h"'
+node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.target '"slack"'
 node --require /tmp/patch.js openclaw.mjs config set gateway.trustedProxies '["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]'
 node --require /tmp/patch.js openclaw.mjs config set gateway.controlUi.allowedOrigins "[\"$OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS\"]"
 node --require /tmp/patch.js openclaw.mjs config set channels.slack.enabled true
