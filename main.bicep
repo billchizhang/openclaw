@@ -295,6 +295,8 @@ node --require /tmp/patch.js openclaw.mjs config set channels.slack.enabled true
 node --require /tmp/patch.js openclaw.mjs config set channels.slack.dmPolicy '"open"'
 node --require /tmp/patch.js openclaw.mjs config set channels.slack.allowFrom "$OPENCLAW_SLACK_ALLOWED_MEMBERS"
 node --require /tmp/patch.js openclaw.mjs config set channels.slack.groupPolicy '"open"'
+node --require /tmp/patch.js openclaw.mjs config set channels.slack.botToken "$SLACK_BOT_TOKEN"
+node --require /tmp/patch.js openclaw.mjs config set channels.slack.appToken "$SLACK_APP_TOKEN"
 node --require /tmp/patch.js openclaw.mjs config set tools.profile full
 node --require /tmp/patch.js openclaw.mjs mcp set rag-search '{"url":"https://retrieval-mcp-server.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
 node --require /tmp/patch.js openclaw.mjs mcp set asireon-function-call '{"url":"https://asireon-func-mcp.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
@@ -340,6 +342,9 @@ EXECUTOR_EOF
 # security check, so we use plugins.load.paths instead of copying to ~/.openclaw/extensions/.
 rm -rf /home/node/.openclaw/extensions/token-budget
 node --require /tmp/patch.js openclaw.mjs config set plugins.load.paths '["/app/custom-plugins/token-budget"]'
+# Clear any stale plugins.allow allowlist that may persist on the Azure File Share from prior deployments.
+# An allowlist with only "token-budget" would silently block all other bundled channel plugins (including Slack).
+node --require /tmp/patch.js openclaw.mjs config unset plugins.allow
 # Azure OpenAI provider for token budget fallback (must be configured before plugin refs it)
 node --require /tmp/patch.js openclaw.mjs config set models.providers.azure-openai-responses.api '"openai-responses"'
 node --require /tmp/patch.js openclaw.mjs config set models.providers.azure-openai-responses.models '["gpt-4o"]'
