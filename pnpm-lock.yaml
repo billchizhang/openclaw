@@ -4598,7 +4598,6 @@ packages:
   '@zed-industries/codex-acp@0.14.0':
     resolution: {integrity: sha512-IT9Zh9YDsRfXnc+RN9T00OCBFZrvQxzsWARWL9C1f0do4xB67eCZGildkJCHjoXmGAyYn1V7rIdRR6/+PzDdmw==}
     hasBin: true
->>>>>>> upstream/main
 
   abort-controller@3.0.0:
     resolution: {integrity: sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg==}
