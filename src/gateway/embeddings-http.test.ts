@@ -1,33 +1,61 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { resolveAgentDir } from "../agents/agent-scope.js";
+import type { MemoryEmbeddingProviderAdapter } from "../plugins/memory-embedding-providers.js";
 import { getFreePort, installGatewayTestHooks } from "./test-helpers.js";
 
 installGatewayTestHooks({ scope: "suite" });
 
+const WRITE_SCOPE_HEADER = { "x-openclaw-scopes": "operator.write" };
+
 let startGatewayServer: typeof import("./server.js").startGatewayServer;
-let createEmbeddingProviderMock: ReturnType<typeof vi.fn>;
+let createEmbeddingProviderMock: ReturnType<
+  typeof vi.fn<
+    (options: { provider: string; model: string; agentDir?: string }) => Promise<{
+      provider: {
+        id: string;
+        model: string;
+        embedQuery: (text: string) => Promise<number[]>;
+        embedBatch: (texts: string[]) => Promise<number[][]>;
+      };
+    }>
+  >
+>;
+let clearMemoryEmbeddingProviders: typeof import("../plugins/memory-embedding-providers.js").clearMemoryEmbeddingProviders;
+let registerMemoryEmbeddingProvider: typeof import("../plugins/memory-embedding-providers.js").registerMemoryEmbeddingProvider;
 let enabledServer: Awaited<ReturnType<typeof startServer>>;
 let enabledPort: number;
 
 beforeAll(async () => {
-  vi.resetModules();
-  createEmbeddingProviderMock = vi.fn(async (options: { provider: string; model: string }) => ({
-    provider: {
-      id: options.provider,
-      model: options.model,
-      embedQuery: async () => [0.1, 0.2],
-      embedBatch: async (texts: string[]) =>
-        texts.map((_text, index) => [index + 0.1, index + 0.2]),
+  ({ clearMemoryEmbeddingProviders, registerMemoryEmbeddingProvider } =
+    await import("../plugins/memory-embedding-providers.js"));
+  createEmbeddingProviderMock = vi.fn(
+    async (options: { provider: string; model: string; agentDir?: string }) => ({
+      provider: {
+        id: options.provider,
+        model: options.model,
+        embedQuery: async () => [0.1, 0.2],
+        embedBatch: async (texts: string[]) =>
+          texts.map((_text, index) => [index + 0.1, index + 0.2]),
+      },
+    }),
+  );
+  clearMemoryEmbeddingProviders();
+  const openAiAdapter: MemoryEmbeddingProviderAdapter = {
+    id: "openai",
+    defaultModel: "text-embedding-3-small",
+    transport: "remote",
+    autoSelectPriority: 20,
+    allowExplicitWhenConfiguredAuto: true,
+    create: async (options) => {
+      const result = await createEmbeddingProviderMock({
+        provider: "openai",
+        model: options.model,
+        agentDir: options.agentDir,
+      });
+      return result;
     },
-  }));
-  vi.doMock("../memory/embeddings.js", async () => {
-    const actual =
-      await vi.importActual<typeof import("../memory/embeddings.js")>("../memory/embeddings.js");
-    return {
-      ...actual,
-      createEmbeddingProvider: createEmbeddingProviderMock,
-    };
-  });
+  };
+  registerMemoryEmbeddingProvider(openAiAdapter);
   ({ startGatewayServer } = await import("./server.js"));
   enabledPort = await getFreePort();
   enabledServer = await startServer(enabledPort, { openAiChatCompletionsEnabled: true });
@@ -35,6 +63,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await enabledServer.close({ reason: "embeddings http enabled suite done" });
+  clearMemoryEmbeddingProviders();
   vi.resetModules();
 });
 
@@ -53,10 +82,24 @@ async function postEmbeddings(body: unknown, headers?: Record<string, string>) {
     headers: {
       authorization: "Bearer secret",
       "content-type": "application/json",
+      ...WRITE_SCOPE_HEADER,
       ...headers,
     },
     body: JSON.stringify(body),
   });
+}
+
+function latestCreateEmbeddingProviderOptions(): {
+  agentDir?: string;
+  model?: string;
+  provider?: string;
+} {
+  const calls = createEmbeddingProviderMock.mock.calls;
+  const call = calls[calls.length - 1];
+  if (!call) {
+    throw new Error("expected embedding provider create call");
+  }
+  return call[0];
 }
 
 describe("OpenAI-compatible embeddings HTTP API (e2e)", () => {
@@ -97,13 +140,9 @@ describe("OpenAI-compatible embeddings HTTP API (e2e)", () => {
     expect(qualified.status).toBe(200);
     const qualifiedJson = (await qualified.json()) as { model?: string };
     expect(qualifiedJson.model).toBe("openclaw/default");
-    const lastCall = createEmbeddingProviderMock.mock.calls.at(-1)?.[0] as
-      | { provider?: string; model?: string }
-      | undefined;
-    expect(lastCall).toMatchObject({
-      provider: "openai",
-      model: "text-embedding-3-small",
-    });
+    const lastCall = latestCreateEmbeddingProviderOptions();
+    expect(lastCall.provider).toBe("openai");
+    expect(lastCall.model).toBe("text-embedding-3-small");
   });
 
   it("supports base64 encoding and agent-scoped auth/config resolution", async () => {
@@ -119,12 +158,9 @@ describe("OpenAI-compatible embeddings HTTP API (e2e)", () => {
     const json = (await res.json()) as { data?: Array<{ embedding?: string }> };
     expect(typeof json.data?.[0]?.embedding).toBe("string");
     expect(createEmbeddingProviderMock).toHaveBeenCalled();
-    const lastCall = createEmbeddingProviderMock.mock.calls.at(-1)?.[0] as
-      | { provider?: string; model?: string; fallback?: string; agentDir?: string }
-      | undefined;
-    expect(typeof lastCall?.model).toBe("string");
-    expect(lastCall?.fallback).toBe("none");
-    expect(lastCall?.agentDir).toBe(resolveAgentDir({}, "beta"));
+    const lastCall = latestCreateEmbeddingProviderOptions();
+    expect(typeof lastCall.model).toBe("string");
+    expect(lastCall.agentDir).toBe(resolveAgentDir({}, "beta"));
   });
 
   it("rejects invalid input shapes", async () => {
@@ -135,6 +171,64 @@ describe("OpenAI-compatible embeddings HTTP API (e2e)", () => {
     expect(res.status).toBe(400);
     const json = (await res.json()) as { error?: { type?: string } };
     expect(json.error?.type).toBe("invalid_request_error");
+  });
+
+  it("ignores narrower declared scopes for shared-secret bearer auth", async () => {
+    const res = await postEmbeddings(
+      {
+        model: "openclaw/default",
+        input: "hello",
+      },
+      { "x-openclaw-scopes": "operator.read" },
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      object?: string;
+      data?: Array<{ object?: string; embedding?: number[] }>;
+    };
+    expect(json.object).toBe("list");
+    expect(json.data?.[0]?.object).toBe("embedding");
+    expect(json.data?.[0]?.embedding).toEqual([0.1, 0.2]);
+  });
+
+  it("allows requests with an empty declared scopes header", async () => {
+    const res = await postEmbeddings(
+      {
+        model: "openclaw/default",
+        input: "hello",
+      },
+      { "x-openclaw-scopes": "" },
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      object?: string;
+      data?: Array<{ object?: string; embedding?: number[] }>;
+    };
+    expect(json.object).toBe("list");
+    expect(json.data?.[0]?.object).toBe("embedding");
+    expect(json.data?.[0]?.embedding).toEqual([0.1, 0.2]);
+  });
+
+  it("allows requests when the operator scopes header is missing", async () => {
+    const res = await fetch(`http://127.0.0.1:${enabledPort}/v1/embeddings`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer secret",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "openclaw/default",
+        input: "hello",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      object?: string;
+      data?: Array<{ object?: string; embedding?: number[] }>;
+    };
+    expect(json.object).toBe("list");
+    expect(json.data?.[0]?.object).toBe("embedding");
+    expect(json.data?.[0]?.embedding).toEqual([0.1, 0.2]);
   });
 
   it("rejects invalid agent targets", async () => {

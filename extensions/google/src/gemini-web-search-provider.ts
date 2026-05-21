@@ -1,39 +1,21 @@
-import { Type } from "@sinclair/typebox";
-import { DEFAULT_GOOGLE_API_BASE_URL } from "openclaw/plugin-sdk/provider-google";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
-  buildSearchCacheKey,
-  buildUnsupportedSearchFilterResponse,
-  DEFAULT_SEARCH_COUNT,
-  getScopedCredentialValue,
-  MAX_SEARCH_COUNT,
+  createWebSearchProviderContractFields,
   mergeScopedSearchConfig,
-  readCachedSearchPayload,
-  readConfiguredSecretString,
-  readNumberParam,
-  readProviderEnvValue,
-  readStringParam,
-  resolveCitationRedirectUrl,
   resolveProviderWebSearchPluginConfig,
-  resolveSearchCacheTtlMs,
-  resolveSearchCount,
-  resolveSearchTimeoutSeconds,
-  setScopedCredentialValue,
-  setProviderWebSearchPluginConfigValue,
-  type SearchConfigRecord,
   type WebSearchProviderPlugin,
   type WebSearchProviderToolDefinition,
-  withTrustedWebSearchEndpoint,
-  wrapWebContent,
-  writeCachedSearchPayload,
-} from "openclaw/plugin-sdk/provider-web-search";
+} from "openclaw/plugin-sdk/provider-web-search-config-contract";
+import {
+  resolveGeminiApiKey,
+  resolveGeminiBaseUrl,
+  resolveGeminiModel,
+} from "./gemini-web-search-provider.shared.js";
 
-const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
-const GEMINI_API_BASE = DEFAULT_GOOGLE_API_BASE_URL;
+const GEMINI_CREDENTIAL_PATH = "plugins.entries.google.config.webSearch.apiKey";
+const GOOGLE_PROVIDER_CREDENTIAL_PATH = "models.providers.google.apiKey";
 
-type GeminiConfig = {
-  apiKey?: string;
-  model?: string;
-};
+type GeminiWebSearchRuntime = typeof import("./gemini-web-search-provider.runtime.js");
 
 type GeminiGroundingResponse = {
   candidates?: Array<{
@@ -66,11 +48,12 @@ type GeminiGroundingResponse = {
   };
 };
 
-function resolveGeminiConfig(searchConfig?: SearchConfigRecord): GeminiConfig {
-  const gemini = searchConfig?.gemini;
-  return gemini && typeof gemini === "object" && !Array.isArray(gemini)
-    ? (gemini as GeminiConfig)
-    : {};
+let geminiWebSearchRuntimePromise: Promise<GeminiWebSearchRuntime> | undefined;
+
+
+function loadGeminiWebSearchRuntime(): Promise<GeminiWebSearchRuntime> {
+  geminiWebSearchRuntimePromise ??= import("./gemini-web-search-provider.runtime.js");
+  return geminiWebSearchRuntimePromise;
 }
 
 function resolveGeminiApiKey(gemini?: GeminiConfig): string | undefined {
@@ -174,126 +157,128 @@ async function runGeminiSearch(params: {
   );
 }
 
-function createGeminiSchema() {
-  return Type.Object({
-    query: Type.String({ description: "Search query string." }),
-    count: Type.Optional(
-      Type.Number({
-        description: "Number of results to return (1-10).",
-        minimum: 1,
-        maximum: MAX_SEARCH_COUNT,
-      }),
-    ),
-    country: Type.Optional(Type.String({ description: "Not supported by Gemini." })),
-    language: Type.Optional(Type.String({ description: "Not supported by Gemini." })),
-    freshness: Type.Optional(Type.String({ description: "Not supported by Gemini." })),
-    date_after: Type.Optional(Type.String({ description: "Not supported by Gemini." })),
-    date_before: Type.Optional(Type.String({ description: "Not supported by Gemini." })),
-  });
-}
+const GEMINI_TOOL_PARAMETERS = {
+  type: "object",
+  properties: {
+    query: { type: "string", description: "Search query string." },
+    count: {
+      type: "number",
+      description: "Number of results to return (1-10).",
+      minimum: 1,
+      maximum: 10,
+    },
+    country: { type: "string", description: "Not supported by Gemini." },
+    language: { type: "string", description: "Not supported by Gemini." },
+    freshness: {
+      type: "string",
+      description: "Limit Google Search grounding to recent results: day, week, month, or year.",
+    },
+    date_after: {
+      type: "string",
+      description: "Only ground with results published after this date (YYYY-MM-DD).",
+    },
+    date_before: {
+      type: "string",
+      description: "Only ground with results published before this date (YYYY-MM-DD).",
+    },
+  },
+  required: ["query"],
+} satisfies Record<string, unknown>;
 
 function createGeminiToolDefinition(
-  searchConfig?: SearchConfigRecord,
+  searchConfig?: Record<string, unknown>,
 ): WebSearchProviderToolDefinition {
   return {
     description:
       "Search the web using Gemini with Google Search grounding. Returns AI-synthesized answers with citations from Google Search.",
-    parameters: createGeminiSchema(),
-    execute: async (args) => {
-      const params = args as Record<string, unknown>;
-      const unsupportedResponse = buildUnsupportedSearchFilterResponse(params, "gemini");
-      if (unsupportedResponse) {
-        return unsupportedResponse;
-      }
-
-      const geminiConfig = resolveGeminiConfig(searchConfig);
-      const apiKey = resolveGeminiApiKey(geminiConfig);
-      if (!apiKey) {
-        return {
-          error: "missing_gemini_api_key",
-          message:
-            "web_search (gemini) needs an API key. Set GEMINI_API_KEY in the Gateway environment, or configure tools.web.search.gemini.apiKey.",
-          docs: "https://docs.openclaw.ai/tools/web",
-        };
-      }
-
-      const query = readStringParam(params, "query", { required: true });
-      const count =
-        readNumberParam(params, "count", { integer: true }) ??
-        searchConfig?.maxResults ??
-        undefined;
-      const model = resolveGeminiModel(geminiConfig);
-      const cacheKey = buildSearchCacheKey([
-        "gemini",
-        query,
-        resolveSearchCount(count, DEFAULT_SEARCH_COUNT),
-        model,
-      ]);
-      const cached = readCachedSearchPayload(cacheKey);
-      if (cached) {
-        return cached;
-      }
-
-      const start = Date.now();
-      const result = await runGeminiSearch({
-        query,
-        apiKey,
-        model,
-        timeoutSeconds: resolveSearchTimeoutSeconds(searchConfig),
-      });
-      const payload = {
-        query,
-        provider: "gemini",
-        model,
-        tookMs: Date.now() - start,
-        externalContent: {
-          untrusted: true,
-          source: "web_search",
-          provider: "gemini",
-          wrapped: true,
-        },
-        content: wrapWebContent(result.content),
-        citations: result.citations,
-      };
-      writeCachedSearchPayload(cacheKey, payload, resolveSearchCacheTtlMs(searchConfig));
-      return payload;
+    parameters: GEMINI_TOOL_PARAMETERS,
+    execute: async (args, context) => {
+      const { executeGeminiSearch } = await loadGeminiWebSearchRuntime();
+      return await executeGeminiSearch(args, searchConfig, context);
     },
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function resolveGoogleModelProviderConfig(
+  config?: OpenClawConfig,
+): Record<string, unknown> | undefined {
+  const provider = config?.models?.providers?.google;
+  return isRecord(provider) ? provider : undefined;
+}
+
+function getGoogleModelProviderCredentialFallback(
+  config?: OpenClawConfig,
+): { path: string; value: unknown } | undefined {
+  const provider = resolveGoogleModelProviderConfig(config);
+  return provider && provider.apiKey !== undefined
+    ? { path: GOOGLE_PROVIDER_CREDENTIAL_PATH, value: provider.apiKey }
+    : undefined;
+}
+
+function withGoogleModelProviderFallbacks(
+  searchConfig: Record<string, unknown> | undefined,
+  config?: OpenClawConfig,
+): Record<string, unknown> | undefined {
+  const provider = resolveGoogleModelProviderConfig(config);
+  if (!provider || (provider.apiKey === undefined && provider.baseUrl === undefined)) {
+    return searchConfig;
+  }
+  const gemini = isRecord(searchConfig?.gemini) ? { ...searchConfig.gemini } : {};
+  const mergedSearchConfig = searchConfig ? { ...searchConfig } : {};
+  if (provider.apiKey !== undefined) {
+    gemini.providerApiKey = provider.apiKey;
+  }
+  if (provider.baseUrl !== undefined) {
+    gemini.providerBaseUrl = provider.baseUrl;
+  }
+  return {
+    ...mergedSearchConfig,
+    gemini,
+  };
+}
+
 export function createGeminiWebSearchProvider(): WebSearchProviderPlugin {
+  const contractFields = createWebSearchProviderContractFields({
+    credentialPath: GEMINI_CREDENTIAL_PATH,
+    searchCredential: { type: "scoped", scopeId: "gemini" },
+    configuredCredential: { pluginId: "google" },
+  });
+
   return {
     id: "gemini",
     label: "Gemini (Google Search)",
     hint: "Requires Google Gemini API key · Google Search grounding",
+    onboardingScopes: ["text-inference"],
     credentialLabel: "Google Gemini API key",
     envVars: ["GEMINI_API_KEY"],
     placeholder: "AIza...",
     signupUrl: "https://aistudio.google.com/apikey",
     docsUrl: "https://docs.openclaw.ai/tools/web",
     autoDetectOrder: 20,
-    credentialPath: "plugins.entries.google.config.webSearch.apiKey",
-    inactiveSecretPaths: ["plugins.entries.google.config.webSearch.apiKey"],
-    getCredentialValue: (searchConfig) => getScopedCredentialValue(searchConfig, "gemini"),
-    setCredentialValue: (searchConfigTarget, value) =>
-      setScopedCredentialValue(searchConfigTarget, "gemini", value),
-    getConfiguredCredentialValue: (config) =>
-      resolveProviderWebSearchPluginConfig(config, "google")?.apiKey,
-    setConfiguredCredentialValue: (configTarget, value) => {
-      setProviderWebSearchPluginConfigValue(configTarget, "google", "apiKey", value);
-    },
+    credentialPath: GEMINI_CREDENTIAL_PATH,
+    ...contractFields,
+    getConfiguredCredentialFallback: getGoogleModelProviderCredentialFallback,
     createTool: (ctx) =>
       createGeminiToolDefinition(
-        mergeScopedSearchConfig(
-          ctx.searchConfig as SearchConfigRecord | undefined,
-          "gemini",
-          resolveProviderWebSearchPluginConfig(ctx.config, "google"),
-        ) as SearchConfigRecord | undefined,
+        withGoogleModelProviderFallbacks(
+          mergeScopedSearchConfig(
+            ctx.searchConfig,
+            "gemini",
+            resolveProviderWebSearchPluginConfig(ctx.config, "google"),
+          ),
+          ctx.config,
+        ),
       ),
   };
 }
 
-export const __testing = {
+export const testing = {
   resolveGeminiApiKey,
+  resolveGeminiBaseUrl,
   resolveGeminiModel,
 } as const;
+export { testing as __testing };
