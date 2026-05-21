@@ -96,7 +96,6 @@ USER.md
 
 # Agent credentials and memory (NEVER COMMIT)
 /memory/
-.agent/*.json
 !.agent/workflows/
 /local/
 package-lock.json
