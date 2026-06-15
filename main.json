@@ -78,6 +78,12 @@
         "description": "Gemini API Key for web search grounding"
       }
     },
+    "openRouterApiKey": {
+      "type": "securestring",
+      "metadata": {
+        "description": "OpenRouter API Key for DeepSeek and other models"
+      }
+    },
     "slackAppToken": {
       "type": "securestring",
       "metadata": {
