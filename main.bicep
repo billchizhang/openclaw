@@ -36,6 +36,10 @@ param anthropicApiKey string
 @secure()
 param geminiApiKey string
 
+@description('OpenRouter API Key for DeepSeek and other models')
+@secure()
+param openRouterApiKey string
+
 @description('Slack App Token (starts with xapp-) for socket mode')
 @secure()
 param slackAppToken string
@@ -195,6 +199,10 @@ resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
         {
           name: 'gemini-api-key'
           value: geminiApiKey
+        }
+        {
+          name: 'openrouter-api-key'
+          value: openRouterApiKey
         }
         {
           name: 'slack-app-token'
@@ -393,6 +401,10 @@ exec node --require /tmp/patch.js openclaw.mjs gateway --allow-unconfigured --bi
             {
               name: 'GEMINI_API_KEY'
               secretRef: 'gemini-api-key'
+            }
+            {
+              name: 'OPENROUTER_API_KEY'
+              secretRef: 'openrouter-api-key'
             }
 
             // Model Routing Assignments
