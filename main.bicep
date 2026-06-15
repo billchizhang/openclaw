@@ -284,7 +284,7 @@ cat << 'HEARTBEAT_EOF' > /home/node/.openclaw/workspace/HEARTBEAT.md
 - Keep MEMORY.md concise: facts and decisions only, no raw transcript. Append; never overwrite existing entries.
 - If nothing new to curate, reply HEARTBEAT_OK.
 HEARTBEAT_EOF
-node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.model '"anthropic/claude-haiku-4-5"'
+node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.model '"openrouter/deepseek/deepseek-chat"'
 node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.isolatedSession true
 node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.lightContext true
 node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.every '"12h"'
@@ -298,8 +298,8 @@ node --require /tmp/patch.js openclaw.mjs config set channels.slack.groupPolicy 
 node --require /tmp/patch.js openclaw.mjs config set tools.profile full
 node --require /tmp/patch.js openclaw.mjs mcp set rag-search '{"url":"https://retrieval-mcp-server.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
 node --require /tmp/patch.js openclaw.mjs mcp set asireon-function-call '{"url":"https://asireon-func-mcp.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
-node --require /tmp/patch.js openclaw.mjs config set agents.defaults.model.primary '"anthropic/claude-opus-4-6"'
-node --require /tmp/patch.js openclaw.mjs config set 'agents.list[0]' '{"id":"planner","model":{"primary":"anthropic/claude-opus-4-6"},"thinkingDefault":"high","subagents":{"allowAgents":["executor"]}}'
+node --require /tmp/patch.js openclaw.mjs config set agents.defaults.model.primary '"openrouter/deepseek/deepseek-v3.2"'
+node --require /tmp/patch.js openclaw.mjs config set 'agents.list[0]' '{"id":"planner","model":{"primary":"openrouter/deepseek/deepseek-v3.2"},"thinkingDefault":"high","subagents":{"allowAgents":["executor"]}}'
 node --require /tmp/patch.js openclaw.mjs config set 'agents.list[1]' '{"id":"executor","model":{"primary":"openai/gpt-5-mini"},"thinkingDefault":"adaptive"}'
 mkdir -p /home/node/.openclaw/workspace-planner
 touch /home/node/.openclaw/workspace-planner/BOOTSTRAP.md
@@ -346,6 +346,7 @@ node --require /tmp/patch.js openclaw.mjs config unset plugins.allow
 # Azure OpenAI provider for token budget fallback (must be configured before plugin refs it)
 node --require /tmp/patch.js openclaw.mjs config set models.providers.azure-openai-responses.api '"openai-responses"'
 node --require /tmp/patch.js openclaw.mjs config set models.providers.azure-openai-responses.models '["gpt-4o"]'
+node --require /tmp/patch.js openclaw.mjs config set models.providers.anthropic.baseUrl '"https://api.deepseek.com/anthropic"'
 node --require /tmp/patch.js openclaw.mjs config set models.providers.azure-openai-responses.baseUrl "$AZURE_OPENAI_BASE_URL"
 node --require /tmp/patch.js openclaw.mjs config set models.providers.azure-openai-responses.apiKey "$AZURE_OPENAI_API_KEY"
 # Token budget plugin config (provider must exist before fallbackProvider is set)
@@ -397,7 +398,7 @@ exec node --require /tmp/patch.js openclaw.mjs gateway --allow-unconfigured --bi
             // Model Routing Assignments
             {
               name: 'OPENCLAW_AGENTS_DEFAULTS_MODEL_PRIMARY'
-              value: 'anthropic/claude-opus-4-6' // Deep Thinking Brain
+              value: 'openrouter/deepseek/deepseek-v3.2' // Deep Thinking Brain
             }
             {
               name: 'OPENCLAW_AGENTS_DEFAULTS_MODEL_FAST'

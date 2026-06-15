@@ -118,7 +118,7 @@ export async function fetchClaudeUsage(
   fetchFn: typeof fetch,
 ): Promise<ProviderUsageSnapshot> {
   const res = await fetchJson(
-    "https://api.anthropic.com/api/oauth/usage",
+    "https://api.deepseek.com/anthropic/api/oauth/usage",
     {
       headers: {
         Authorization: `Bearer ${token}`,
