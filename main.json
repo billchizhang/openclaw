@@ -217,12 +217,20 @@
               "value": "[parameters('geminiApiKey')]"
             },
             {
+              "name": "openrouter-api-key",
+              "value": "[parameters('openRouterApiKey')]"
+            },
+            {
               "name": "slack-app-token",
               "value": "[parameters('slackAppToken')]"
             },
             {
               "name": "slack-bot-token",
               "value": "[parameters('slackBotToken')]"
+            },
+            {
+              "name": "azure-openai-api-key",
+              "value": "[listKeys(resourceId('Microsoft.CognitiveServices/accounts', parameters('openAiAccountName')), '2024-10-01').key1]"
             }
           ],
           "registries": [
@@ -280,6 +288,10 @@
                   "secretRef": "gemini-api-key"
                 },
                 {
+                  "name": "OPENROUTER_API_KEY",
+                  "secretRef": "openrouter-api-key"
+                },
+                {
                   "name": "OPENCLAW_AGENTS_DEFAULTS_MODEL_PRIMARY",
                   "value": "anthropic/claude-opus-4-6"
                 },
@@ -294,6 +306,14 @@
                 {
                   "name": "OPENCLAW_SLACK_ALLOWED_MEMBERS",
                   "value": "[parameters('slackAllowedMembers')]"
+                },
+                {
+                  "name": "AZURE_OPENAI_API_KEY",
+                  "secretRef": "azure-openai-api-key"
+                },
+                {
+                  "name": "AZURE_OPENAI_BASE_URL",
+                  "value": "[reference(resourceId('Microsoft.CognitiveServices/accounts', parameters('openAiAccountName')), '2024-10-01').properties.endpoint]"
                 }
               ],
               "volumeMounts": [
