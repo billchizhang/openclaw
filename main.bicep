@@ -310,6 +310,53 @@ node --require /tmp/patch.js openclaw.mjs config set agents.defaults.model.prima
 node --require /tmp/patch.js openclaw.mjs config set 'agents.list[0]' '{"id":"planner","model":{"primary":"openrouter/deepseek/deepseek-v3.2"},"thinkingDefault":"high","subagents":{"allowAgents":["executor"]}}'
 node --require /tmp/patch.js openclaw.mjs config unset 'agents.list[0].model.fallback'
 node --require /tmp/patch.js openclaw.mjs config unset 'agents.list[0].model.fallbacks'
+# Write API keys to auth-profiles.json so embedded agent runtime can resolve credentials
+cat > /tmp/setup-auth.js << 'AUTH_SETUP_EOF'
+const fs = require('fs');
+const path = require('path');
+const authDir = '/home/node/.openclaw/agents/main/agent';
+fs.mkdirSync(authDir, { recursive: true });
+const authPath = path.join(authDir, 'auth-profiles.json');
+let store = { version: 1, profiles: {} };
+if (fs.existsSync(authPath)) {
+  const raw = fs.readFileSync(authPath, 'utf8');
+  try {
+    store = JSON.parse(raw);
+  } catch {}
+}
+store.profiles = store.profiles || {};
+// Write all provider credentials from environment variables
+if (process.env.OPENROUTER_API_KEY) {
+  store.profiles['openrouter:default'] = {
+    type: 'api_key',
+    provider: 'openrouter',
+    key: process.env.OPENROUTER_API_KEY,
+  };
+}
+if (process.env.OPENAI_API_KEY) {
+  store.profiles['openai:default'] = {
+    type: 'api_key',
+    provider: 'openai',
+    key: process.env.OPENAI_API_KEY,
+  };
+}
+if (process.env.ANTHROPIC_API_KEY) {
+  store.profiles['anthropic:default'] = {
+    type: 'api_key',
+    provider: 'anthropic',
+    key: process.env.ANTHROPIC_API_KEY,
+  };
+}
+if (process.env.GEMINI_API_KEY) {
+  store.profiles['google:default'] = {
+    type: 'api_key',
+    provider: 'google',
+    key: process.env.GEMINI_API_KEY,
+  };
+}
+fs.writeFileSync(authPath, JSON.stringify(store, null, 2));
+AUTH_SETUP_EOF
+node /tmp/setup-auth.js
 node --require /tmp/patch.js openclaw.mjs config set 'agents.list[1]' '{"id":"executor","model":{"primary":"openai/gpt-5-mini"},"thinkingDefault":"adaptive"}'
 mkdir -p /home/node/.openclaw/agents/planner/agent
 if [ -f /home/node/.openclaw/agents/main/agent/auth-profiles.json ]; then
