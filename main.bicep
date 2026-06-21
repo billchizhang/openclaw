@@ -308,7 +308,13 @@ node --require /tmp/patch.js openclaw.mjs mcp set rag-search '{"url":"https://re
 node --require /tmp/patch.js openclaw.mjs mcp set asireon-function-call '{"url":"https://asireon-func-mcp.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
 node --require /tmp/patch.js openclaw.mjs config set agents.defaults.model.primary '"openrouter/deepseek/deepseek-v3.2"'
 node --require /tmp/patch.js openclaw.mjs config set 'agents.list[0]' '{"id":"planner","model":{"primary":"openrouter/deepseek/deepseek-v3.2"},"thinkingDefault":"high","subagents":{"allowAgents":["executor"]}}'
+node --require /tmp/patch.js openclaw.mjs config unset 'agents.list[0].model.fallback'
+node --require /tmp/patch.js openclaw.mjs config unset 'agents.list[0].model.fallbacks'
 node --require /tmp/patch.js openclaw.mjs config set 'agents.list[1]' '{"id":"executor","model":{"primary":"openai/gpt-5-mini"},"thinkingDefault":"adaptive"}'
+mkdir -p /home/node/.openclaw/agents/planner/agent
+if [ -f /home/node/.openclaw/agents/main/agent/auth-profiles.json ]; then
+  cp -f /home/node/.openclaw/agents/main/agent/auth-profiles.json /home/node/.openclaw/agents/planner/agent/auth-profiles.json
+fi
 mkdir -p /home/node/.openclaw/workspace-planner
 touch /home/node/.openclaw/workspace-planner/BOOTSTRAP.md
 cat << 'PLANNER_EOF' > /home/node/.openclaw/workspace-planner/AGENTS.md
