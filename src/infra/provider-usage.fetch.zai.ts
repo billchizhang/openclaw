@@ -1,4 +1,11 @@
-import { buildUsageHttpErrorSnapshot, fetchJson } from "./provider-usage.fetch.shared.js";
+// Fetches and normalizes Z.ai provider usage records.
+import {
+  buildUsageHttpErrorSnapshot,
+  discardUsageResponseBody,
+  fetchJson,
+  parseUsageResetAt,
+  readUsageJson,
+} from "./provider-usage.fetch.shared.js";
 import { clampPercent, PROVIDER_LABELS } from "./provider-usage.shared.js";
 import type { ProviderUsageSnapshot, UsageWindow } from "./provider-usage.types.js";
 
@@ -38,13 +45,18 @@ export async function fetchZaiUsage(
   );
 
   if (!res.ok) {
+    await discardUsageResponseBody(res);
     return buildUsageHttpErrorSnapshot({
       provider: "zai",
       status: res.status,
     });
   }
 
-  const data = (await res.json()) as ZaiUsageResponse;
+  const parsed = await readUsageJson("zai", res);
+  if (!parsed.ok) {
+    return parsed.snapshot;
+  }
+  const data = parsed.data as ZaiUsageResponse;
   if (!data.success || data.code !== 200) {
     const errorMessage = typeof data.msg === "string" ? data.msg.trim() : "";
     return {
@@ -60,7 +72,7 @@ export async function fetchZaiUsage(
 
   for (const limit of limits) {
     const percent = clampPercent(limit.percentage || 0);
-    const nextReset = limit.nextResetTime ? new Date(limit.nextResetTime).getTime() : undefined;
+    const nextReset = parseUsageResetAt(limit.nextResetTime);
     let windowLabel = "Limit";
     if (limit.unit === 1) {
       windowLabel = `${limit.number}d`;

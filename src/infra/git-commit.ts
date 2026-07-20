@@ -1,8 +1,11 @@
+// Resolves git commit metadata for build/runtime diagnostics.
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { resolveGitHeadPath } from "./git-root.js";
+import { pruneMapToMaxSize } from "./map-size.js";
 import { resolveOpenClawPackageRootSync } from "./openclaw-root.js";
 
 const formatCommit = (value?: string | null) => {
@@ -17,12 +20,13 @@ const formatCommit = (value?: string | null) => {
   if (!match) {
     return null;
   }
-  return match[0].slice(0, 7).toLowerCase();
+  return normalizeLowercaseStringOrEmpty(match[0].slice(0, 7));
 };
 
 const cachedGitCommitBySearchDir = new Map<string, string | null>();
+const GIT_COMMIT_CACHE_LIMIT = 256;
 
-export type CommitMetadataReaders = {
+type CommitMetadataReaders = {
   readGitCommit?: (searchDir: string, packageRoot: string | null) => string | null | undefined;
   readBuildInfoCommit?: () => string | null;
   readPackageJsonCommit?: () => string | null;
@@ -64,13 +68,9 @@ const safeReadFilePrefix = (filePath: string, limit = 256) => {
 
 const cacheGitCommit = (searchDir: string, commit: string | null) => {
   cachedGitCommitBySearchDir.set(searchDir, commit);
+  pruneMapToMaxSize(cachedGitCommitBySearchDir, GIT_COMMIT_CACHE_LIMIT);
   return commit;
 };
-
-const clearCachedGitCommits = () => {
-  cachedGitCommitBySearchDir.clear();
-};
-
 const resolveGitLookupDepth = (searchDir: string, packageRoot: string | null) => {
   if (!packageRoot) {
     return undefined;
@@ -99,12 +99,20 @@ const readCommitFromGit = (
   }
   if (head.startsWith("ref:")) {
     const ref = head.replace(/^ref:\s*/i, "").trim();
-    const refPath = resolveRefPath(headPath, ref);
+    const refsBase = resolveGitRefsBase(headPath);
+    const refPath = resolveRefPath(refsBase, ref);
     if (!refPath) {
       return null;
     }
-    const refHash = safeReadFilePrefix(refPath).trim();
-    return formatCommit(refHash);
+    try {
+      const refHash = safeReadFilePrefix(refPath).trim();
+      return formatCommit(refHash);
+    } catch (error) {
+      if (!isMissingPathError(error)) {
+        throw error;
+      }
+    }
+    return readCommitFromPackedRefs(refsBase, ref);
   }
   return formatCommit(head);
 };
@@ -125,8 +133,29 @@ const resolveGitRefsBase = (headPath: string) => {
   return gitDir;
 };
 
+const readCommitFromPackedRefs = (refsBase: string, ref: string) => {
+  try {
+    const packedRefs = fs.readFileSync(path.join(refsBase, "packed-refs"), "utf-8");
+    for (const line of packedRefs.split("\n")) {
+      if (!line || line.startsWith("#") || line.startsWith("^")) {
+        continue;
+      }
+      const [commit, packedRef] = line.trim().split(/\s+/, 2);
+      if (packedRef === ref) {
+        return formatCommit(commit);
+      }
+    }
+    return null;
+  } catch (error) {
+    if (!isMissingPathError(error)) {
+      throw error;
+    }
+    return null;
+  }
+};
+
 /** Safely resolve a git ref path, rejecting traversal attacks from a crafted HEAD file. */
-const resolveRefPath = (headPath: string, ref: string) => {
+const resolveRefPath = (refsBase: string, ref: string) => {
   if (!ref.startsWith("refs/")) {
     return null;
   }
@@ -136,7 +165,6 @@ const resolveRefPath = (headPath: string, ref: string) => {
   if (ref.split(/[/]/).includes("..")) {
     return null;
   }
-  const refsBase = resolveGitRefsBase(headPath);
   const resolved = path.resolve(refsBase, ref);
   const rel = path.relative(refsBase, resolved);
   if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
@@ -199,7 +227,12 @@ export const resolveCommitHash = (
   }
   const searchDir = resolveCommitSearchDir(options);
   if (cachedGitCommitBySearchDir.has(searchDir)) {
-    return cachedGitCommitBySearchDir.get(searchDir) ?? null;
+    const cached = cachedGitCommitBySearchDir.get(searchDir) ?? null;
+    // Git discovery reads multiple files; keep active directories ahead of cold entries when
+    // the shared insertion-order pruning helper enforces the bound.
+    cachedGitCommitBySearchDir.delete(searchDir);
+    cachedGitCommitBySearchDir.set(searchDir, cached);
+    return cached;
   }
   const packageRoot = resolveOpenClawPackageRootSync({
     cwd: options.cwd,
@@ -226,8 +259,4 @@ export const resolveCommitHash = (
   } catch {
     return cacheGitCommit(searchDir, null);
   }
-};
-
-export const __testing = {
-  clearCachedGitCommits,
 };

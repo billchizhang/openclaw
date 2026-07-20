@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+// Verifies plugin SDK subpath exports and generated entrypoint metadata.
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +31,16 @@ function readEntrypoints() {
   return new Set(entrypoints.filter((entry) => entry !== "index"));
 }
 
+function readPrivateLocalOnlySubpaths() {
+  const subpaths = JSON.parse(
+    readFileSync(
+      path.join(repoRoot, "scripts/lib/plugin-sdk-private-local-only-subpaths.json"),
+      "utf8",
+    ),
+  );
+  return new Set(subpaths.filter((entry) => typeof entry === "string" && !entry.includes("/")));
+}
+
 function parsePluginSdkSubpath(specifier) {
   if (!specifier.startsWith("openclaw/plugin-sdk/")) {
     return null;
@@ -51,6 +62,7 @@ function compareEntries(left, right) {
 async function collectViolations() {
   const entrypoints = readEntrypoints();
   const exports = readPackageExports();
+  const privateLocalOnlySubpaths = readPrivateLocalOnlySubpaths();
   const files = (await collectTypeScriptFilesFromRoots(scanRoots, { includeTests: true })).toSorted(
     (left, right) =>
       normalizeRepoPath(repoRoot, left).localeCompare(normalizeRepoPath(repoRoot, right)),
@@ -59,17 +71,14 @@ async function collectViolations() {
 
   for (const filePath of files) {
     const sourceText = readFileSync(filePath, "utf8");
-    const sourceFile = ts.createSourceFile(
-      filePath,
-      sourceText,
-      ts.ScriptTarget.Latest,
-      true,
-      filePath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-    );
+    const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true);
 
     function push(kind, specifierNode, specifier) {
       const subpath = parsePluginSdkSubpath(specifier);
       if (!subpath) {
+        return;
+      }
+      if (privateLocalOnlySubpaths.has(subpath)) {
         return;
       }
 
@@ -120,7 +129,9 @@ async function main() {
   process.exit(1);
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+main().catch(
+  /** @param {unknown} error */ (error) => {
+    console.error(error);
+    process.exit(1);
+  },
+);

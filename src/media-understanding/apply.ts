@@ -1,31 +1,39 @@
+// Applies media-understanding outputs to inbound message context, including
+// attachment normalization, provider execution, file text extraction, and echoing.
 import path from "node:path";
-import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
-import type { MsgContext } from "../auto-reply/templating.js";
-import type { OpenClawConfig } from "../config/config.js";
-import { logVerbose, shouldLogVerbose } from "../globals.js";
-import { renderFileContextBlock } from "../media/file-context.js";
+import { expectDefined } from "@openclaw/normalization-core";
 import {
-  extractFileContentFromSource,
-  normalizeMimeType,
-  resolveInputFileLimits,
-} from "../media/input-files.js";
-import { resolveAttachmentKind } from "./attachments.js";
-import { runWithConcurrency } from "./concurrency.js";
-import { DEFAULT_ECHO_TRANSCRIPT_FORMAT, sendTranscriptEcho } from "./echo-transcript.js";
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalString,
+} from "@openclaw/normalization-core/string-coerce";
+import pMap from "p-map";
+import type { ActiveMediaModel } from "../../packages/media-understanding-common/src/active-model.js";
 import {
   extractMediaUserText,
   formatAudioTranscripts,
   formatMediaUnderstandingBody,
-} from "./format.js";
-import { tryConvertOfficeFile } from "./office-convert.runtime.js";
+} from "../../packages/media-understanding-common/src/format.js";
+import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
+import type { MsgContext } from "../auto-reply/templating.js";
+import type { OpenClawConfig } from "../config/types.js";
+import { logVerbose, shouldLogVerbose } from "../globals.js";
+import { renderFileContextBlock } from "../media/file-context.js";
+import { extractFileContentFromSource, normalizeMimeType } from "../media/input-files.js";
+import { wrapExternalContent } from "../security/external-content.js";
+import { runMediaCapability } from "./apply-capability.js";
+import { resolveAttachmentKind } from "./attachments.js";
+import { DEFAULT_ECHO_TRANSCRIPT_FORMAT, sendTranscriptEcho } from "./echo-transcript.js";
+import type { ExtractedFileImage } from "./extracted-file-images.js";
+import {
+  type FileExtractionLimits,
+  resolveFileExtractionLimits,
+} from "./file-extraction-limits.js";
 import { resolveConcurrency } from "./resolve.js";
 import {
-  type ActiveMediaModel,
   buildProviderRegistry,
   createMediaAttachmentCache,
   normalizeMediaAttachments,
   resolveMediaAttachmentLocalRoots,
-  runCapability,
 } from "./runner.js";
 import type {
   MediaUnderstandingCapability,
@@ -37,6 +45,7 @@ import type {
 export type ApplyMediaUnderstandingResult = {
   outputs: MediaUnderstandingOutput[];
   decisions: MediaUnderstandingDecision[];
+  extractedFileImages: ExtractedFileImage[];
   appliedImage: boolean;
   appliedAudio: boolean;
   appliedVideo: boolean;
@@ -44,7 +53,9 @@ export type ApplyMediaUnderstandingResult = {
 };
 
 const CAPABILITY_ORDER: MediaUnderstandingCapability[] = ["image", "audio", "video"];
-const CONVERTIBLE_OFFICE_EXTS = new Set([".docx", ".pptx", ".xlsx"]);
+const AUDIO_ONLY_CAPABILITY_ORDER: MediaUnderstandingCapability[] = ["audio"];
+const EMPTY_VOICE_NOTE_PLACEHOLDER =
+  "[Voice note could not be transcribed because the audio attachment was too small]";
 const EXTRA_TEXT_MIMES = [
   "application/xml",
   "text/xml",
@@ -71,25 +82,25 @@ const TEXT_EXT_MIME = new Map<string, string>([
   [".xml", "application/xml"],
 ]);
 
+// Reject inputs with trailing junk after the type/subtype to defend against
+// callers that compare the original string elsewhere; permit the standard
+// `;param=value` parameter tail (RFC 9110 §8.3) and discard it.
+const MIME_TYPE = String.raw`([a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+)`;
+const HTTP_TOKEN = String.raw`[a-z0-9!#$%&'*+.^_\x60|~-]+`;
+const HTTP_QUOTED_STRING = String.raw`"(?:[\t !#-\[\]-~]|\\[\t -~])*"`;
+const MIME_PARAMETER = String.raw`[ \t]*;[ \t]*${HTTP_TOKEN}=(?:${HTTP_TOKEN}|${HTTP_QUOTED_STRING})`;
+const MIME_TYPE_WITH_OPTIONAL_PARAMS = new RegExp(
+  String.raw`^${MIME_TYPE}(?:${MIME_PARAMETER})*$`,
+  "i",
+);
+
 function sanitizeMimeType(value?: string): string | undefined {
-  if (!value) {
-    return undefined;
-  }
-  const trimmed = value.trim().toLowerCase();
+  const trimmed = normalizeOptionalString(value);
   if (!trimmed) {
     return undefined;
   }
-  const match = trimmed.match(/^([a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+)/);
-  return match?.[1];
-}
-
-function resolveFileLimits(cfg: OpenClawConfig) {
-  const files = cfg.gateway?.http?.endpoints?.responses?.files;
-  const allowedMimesConfigured = Boolean(files?.allowedMimes?.length);
-  return {
-    ...resolveInputFileLimits(files),
-    allowedMimesConfigured,
-  };
+  const match = trimmed.match(MIME_TYPE_WITH_OPTIONAL_PARAMS);
+  return match?.[1]?.toLowerCase();
 }
 
 function appendFileBlocks(body: string | undefined, blocks: string[]): string {
@@ -104,7 +115,16 @@ function appendFileBlocks(body: string | undefined, blocks: string[]): string {
   return `${base}\n\n${suffix}`.trim();
 }
 
+function wrapUntrustedAttachmentContent(content: string): string {
+  return wrapExternalContent(content, {
+    source: "unknown",
+    includeWarning: false,
+  });
+}
+
 function resolveUtf16Charset(buffer?: Buffer): "utf-16le" | "utf-16be" | undefined {
+  // Some chat attachments arrive as UTF-16 without a reliable MIME charset; the
+  // BOM and zero-byte distribution are enough to select a safe decoder.
   if (!buffer || buffer.length < 2) {
     return undefined;
   }
@@ -241,6 +261,22 @@ function looksLikeUtf8Text(buffer?: Buffer): boolean {
   }
 }
 
+function hasSuspiciousBinarySignal(buffer?: Buffer): boolean {
+  if (!buffer || buffer.length === 0) {
+    return false;
+  }
+  const sample = buffer.subarray(0, Math.min(buffer.length, 4096));
+  if (sample.length < 4 || sample[0] !== 0x50 || sample[1] !== 0x4b) {
+    return false;
+  }
+  const signature =
+    (expectDefined(sample[2], "sample entry at 2") << 8) |
+    expectDefined(sample[3], "sample entry at 3");
+  // Cover the ZIP local-header, central-directory, and empty-archive markers
+  // so archive payloads cannot slip past text coercion when MIME detection is weak.
+  return signature === 0x0304 || signature === 0x0102 || signature === 0x0506;
+}
+
 function decodeTextSample(buffer?: Buffer): string {
   if (!buffer || buffer.length === 0) {
     return "";
@@ -250,8 +286,8 @@ function decodeTextSample(buffer?: Buffer): string {
   if (utf16Charset === "utf-16be") {
     const swapped = Buffer.alloc(sample.length);
     for (let i = 0; i + 1 < sample.length; i += 2) {
-      swapped[i] = sample[i + 1];
-      swapped[i + 1] = sample[i];
+      swapped[i] = expectDefined(sample[i + 1], "UTF-16BE low byte");
+      swapped[i + 1] = expectDefined(sample[i], "UTF-16BE high byte");
     }
     return new TextDecoder("utf-16le").decode(swapped);
   }
@@ -281,8 +317,34 @@ function resolveTextMimeFromName(name?: string): string | undefined {
   if (!name) {
     return undefined;
   }
-  const ext = path.extname(name).toLowerCase();
+  const ext = normalizeLowercaseStringOrEmpty(path.extname(name));
   return TEXT_EXT_MIME.get(ext);
+}
+
+function buildSyntheticSkippedAudioOutputs(
+  decisions: MediaUnderstandingDecision[],
+): MediaUnderstandingOutput[] {
+  const audioDecision = decisions.find((decision) => decision.capability === "audio");
+  if (!audioDecision) {
+    return [];
+  }
+  return audioDecision.attachments.flatMap((attachment) => {
+    const hasTooSmallAttempt = attachment.attempts.some((attempt) =>
+      attempt.reason?.trim().startsWith("tooSmall"),
+    );
+    if (!hasTooSmallAttempt) {
+      return [];
+    }
+    return [
+      {
+        kind: "audio.transcription" as const,
+        attachmentIndex: attachment.attachmentIndex,
+        text: EMPTY_VOICE_NOTE_PLACEHOLDER,
+        provider: "openclaw",
+        model: "synthetic-empty-audio",
+      },
+    ];
+  });
 }
 
 function isBinaryMediaMime(mime?: string): boolean {
@@ -301,8 +363,13 @@ function isBinaryMediaMime(mime?: string): boolean {
     mime === "application/gzip" ||
     mime === "application/x-gzip" ||
     mime === "application/x-rar-compressed" ||
-    mime === "application/x-7z-compressed"
+    mime === "application/x-7z-compressed" ||
+    mime === "application/msword" ||
+    mime === "application/x-cfb"
   ) {
+    return true;
+  }
+  if (mime.endsWith("+zip")) {
     return true;
   }
   if (mime.startsWith("application/vnd.")) {
@@ -316,17 +383,24 @@ function isBinaryMediaMime(mime?: string): boolean {
   return false;
 }
 
-async function extractFileBlocks(params: {
+type ExtractedFileContext = {
+  blocks: string[];
+  images: ExtractedFileImage[];
+};
+
+async function extractFileContext(params: {
   attachments: ReturnType<typeof normalizeMediaAttachments>;
   cache: ReturnType<typeof createMediaAttachmentCache>;
-  limits: ReturnType<typeof resolveFileLimits>;
+  cfg: OpenClawConfig;
+  limits: FileExtractionLimits;
   skipAttachmentIndexes?: Set<number>;
-}): Promise<string[]> {
-  const { attachments, cache, limits, skipAttachmentIndexes } = params;
+}): Promise<ExtractedFileContext> {
+  const { attachments, cache, cfg, limits, skipAttachmentIndexes } = params;
   if (!attachments || attachments.length === 0) {
-    return [];
+    return { blocks: [], images: [] };
   }
   const blocks: string[] = [];
+  const images: ExtractedFileImage[] = [];
   for (const attachment of attachments) {
     if (!attachment) {
       continue;
@@ -362,29 +436,10 @@ async function extractFileBlocks(params: {
     const forcedTextMimeResolved = forcedTextMime ?? resolveTextMimeFromName(nameHint ?? "");
     const rawMime = bufferResult?.mime ?? attachment.mime;
     const normalizedRawMime = normalizeMimeType(rawMime);
-    // Office file conversion: .xlsx → CSV, .docx → PDF/markdown, .pptx → PDF
-    const officeExt = path.extname(nameHint ?? "").toLowerCase();
-    if (!forcedTextMimeResolved && CONVERTIBLE_OFFICE_EXTS.has(officeExt) && bufferResult.buffer) {
-      const converted = await tryConvertOfficeFile(officeExt, bufferResult.buffer);
-      if (converted) {
-        if (shouldLogVerbose()) {
-          logVerbose(
-            `media: office file converted (${officeExt} → ${converted.mime}) index=${attachment.index}`,
-          );
-        }
-        blocks.push(
-          renderFileContextBlock({
-            filename: bufferResult.fileName,
-            fallbackName: `file-${attachment.index + 1}`,
-            mimeType: converted.mime,
-            content: converted.text,
-          }),
-        );
-        continue;
-      }
-    }
-
     if (!forcedTextMimeResolved && isBinaryMediaMime(normalizedRawMime)) {
+      continue;
+    }
+    if (hasSuspiciousBinarySignal(bufferResult?.buffer)) {
       continue;
     }
     const utf16Charset = resolveUtf16Charset(bufferResult?.buffer);
@@ -442,6 +497,7 @@ async function extractFileBlocks(params: {
           ...baseLimits,
           allowedMimes,
         },
+        config: cfg,
       });
     } catch (err) {
       if (shouldLogVerbose()) {
@@ -450,10 +506,15 @@ async function extractFileBlocks(params: {
       continue;
     }
     const text = extracted?.text?.trim() ?? "";
-    let blockText = text;
+    let blockText = text ? wrapUntrustedAttachmentContent(text) : "";
+    if (extracted?.images && extracted.images.length > 0) {
+      images.push(
+        ...extracted.images.map((image) => ({ ...image, attachmentIndex: attachment.index })),
+      );
+    }
     if (!blockText) {
       if (extracted?.images && extracted.images.length > 0) {
-        blockText = "[PDF content rendered to images; images not forwarded to model]";
+        blockText = "[PDF content rendered to images]";
       } else {
         blockText = "[No extractable text]";
       }
@@ -467,17 +528,22 @@ async function extractFileBlocks(params: {
       }),
     );
   }
-  return blocks;
+  return { blocks, images };
 }
 
 export async function applyMediaUnderstanding(params: {
   ctx: MsgContext;
   cfg: OpenClawConfig;
+  agentId?: string;
   agentDir?: string;
+  workspaceDir?: string;
   providers?: Record<string, MediaUnderstandingProvider>;
   activeModel?: ActiveMediaModel;
+  /** Preserve native-harness ownership of image, video, and file inputs while applying STT. */
+  processingMode?: "audio-only";
 }): Promise<ApplyMediaUnderstandingResult> {
   const { ctx, cfg } = params;
+  const mediaWorkspaceDir = ctx.MediaWorkspaceDir ?? params.workspaceDir;
   const commandCandidates = [ctx.CommandBody, ctx.RawBody, ctx.Body];
   const originalUserText =
     commandCandidates
@@ -485,28 +551,36 @@ export async function applyMediaUnderstanding(params: {
       .find((value) => value && value.trim()) ?? undefined;
 
   const attachments = normalizeMediaAttachments(ctx);
-  const providerRegistry = buildProviderRegistry(params.providers);
+  const providerRegistry = buildProviderRegistry(params.providers, cfg);
   const cache = createMediaAttachmentCache(attachments, {
-    localPathRoots: resolveMediaAttachmentLocalRoots({ cfg, ctx }),
+    localPathRoots: resolveMediaAttachmentLocalRoots({
+      cfg,
+      ctx,
+      workspaceDir: params.workspaceDir,
+    }),
+    ssrfPolicy: cfg.tools?.web?.fetch?.ssrfPolicy,
+    workspaceDir: mediaWorkspaceDir,
   });
 
   try {
-    const tasks = CAPABILITY_ORDER.map((capability) => async () => {
-      const config = cfg.tools?.media?.[capability];
-      return await runCapability({
-        capability,
-        cfg,
-        ctx,
-        attachments: cache,
-        media: attachments,
-        agentDir: params.agentDir,
-        providerRegistry,
-        config,
-        activeModel: params.activeModel,
-      });
-    });
-
-    const results = await runWithConcurrency(tasks, resolveConcurrency(cfg));
+    const results = await pMap(
+      params.processingMode === "audio-only" ? AUDIO_ONLY_CAPABILITY_ORDER : CAPABILITY_ORDER,
+      async (capability) =>
+        await runMediaCapability({
+          capability,
+          cfg,
+          ctx,
+          attachments: cache,
+          media: attachments,
+          agentId: params.agentId,
+          agentDir: params.agentDir,
+          workspaceDir: params.workspaceDir,
+          providerRegistry,
+          config: cfg.tools?.media?.[capability],
+          activeModel: params.activeModel,
+        }),
+      { concurrency: resolveConcurrency(cfg), stopOnError: false },
+    );
     const outputs: MediaUnderstandingOutput[] = [];
     const decisions: MediaUnderstandingDecision[] = [];
     for (const entry of results) {
@@ -517,6 +591,54 @@ export async function applyMediaUnderstanding(params: {
         outputs.push(output);
       }
       decisions.push(entry.decision);
+    }
+
+    const audioOutputAttachmentIndexes = new Set(
+      outputs
+        .filter((output) => output.kind === "audio.transcription")
+        .map((output) => output.attachmentIndex),
+    );
+    const syntheticSkippedAudioOutputs = buildSyntheticSkippedAudioOutputs(decisions).filter(
+      (output) => !audioOutputAttachmentIndexes.has(output.attachmentIndex),
+    );
+
+    // Merge synthetic placeholders into the audio slice while preserving the
+    // selected audio attachment order from `runCapability()` / `attachments.prefer`.
+    // When audio produced no real outputs, insert the synthetic slice at the
+    // audio capability slot (before video) instead of appending at the end.
+    if (syntheticSkippedAudioOutputs.length > 0) {
+      const audioDecision = decisions.find((decision) => decision.capability === "audio");
+      const audioAttachmentOrder =
+        audioDecision?.attachments.map((attachment) => attachment.attachmentIndex) ?? [];
+      const audioOutputsByAttachmentIndex = new Map<number, MediaUnderstandingOutput>();
+      for (const output of outputs) {
+        if (output.kind === "audio.transcription") {
+          audioOutputsByAttachmentIndex.set(output.attachmentIndex, output);
+        }
+      }
+      for (const output of syntheticSkippedAudioOutputs) {
+        audioOutputsByAttachmentIndex.set(output.attachmentIndex, output);
+      }
+      const mergedAudio = audioAttachmentOrder
+        .map((attachmentIndex) => audioOutputsByAttachmentIndex.get(attachmentIndex))
+        .filter((output): output is MediaUnderstandingOutput => Boolean(output));
+
+      const firstAudioIdx = outputs.findIndex((o) => o.kind === "audio.transcription");
+      if (firstAudioIdx >= 0) {
+        const before = outputs.slice(0, firstAudioIdx);
+        const afterLastAudio = outputs.slice(
+          outputs.reduce(
+            (last, o, i) => (o.kind === "audio.transcription" ? i : last),
+            firstAudioIdx,
+          ) + 1,
+        );
+        outputs.length = 0;
+        outputs.push(...before, ...mergedAudio, ...afterLastAudio);
+      } else {
+        const firstVideoIdx = outputs.findIndex((o) => o.kind === "video.description");
+        const audioInsertIdx = firstVideoIdx >= 0 ? firstVideoIdx : outputs.length;
+        outputs.splice(audioInsertIdx, 0, ...mergedAudio);
+      }
     }
 
     if (decisions.length > 0) {
@@ -552,34 +674,50 @@ export async function applyMediaUnderstanding(params: {
       }
       ctx.MediaUnderstanding = [...(ctx.MediaUnderstanding ?? []), ...outputs];
     }
+    // Only skip file extraction for attachments that have a real (non-synthetic)
+    // audio transcription. Synthetic placeholders should not prevent file extraction
+    // for tiny audio-MIME files that could be recovered as text via forcedTextMime.
+    const syntheticAudioIndexes = new Set(
+      syntheticSkippedAudioOutputs.map((o) => o.attachmentIndex),
+    );
     const audioAttachmentIndexes = new Set(
       outputs
-        .filter((output) => output.kind === "audio.transcription")
+        .filter(
+          (output) =>
+            output.kind === "audio.transcription" &&
+            !syntheticAudioIndexes.has(output.attachmentIndex),
+        )
         .map((output) => output.attachmentIndex),
     );
-    const fileBlocks = await extractFileBlocks({
-      attachments,
-      cache,
-      limits: resolveFileLimits(cfg),
-      skipAttachmentIndexes: audioAttachmentIndexes.size > 0 ? audioAttachmentIndexes : undefined,
-    });
-    if (fileBlocks.length > 0) {
-      ctx.Body = appendFileBlocks(ctx.Body, fileBlocks);
+    const fileContext =
+      params.processingMode === "audio-only"
+        ? { blocks: [], images: [] }
+        : await extractFileContext({
+            attachments,
+            cache,
+            cfg,
+            limits: resolveFileExtractionLimits(cfg),
+            skipAttachmentIndexes:
+              audioAttachmentIndexes.size > 0 ? audioAttachmentIndexes : undefined,
+          });
+    if (fileContext.blocks.length > 0) {
+      ctx.Body = appendFileBlocks(ctx.Body, fileContext.blocks);
     }
-    if (outputs.length > 0 || fileBlocks.length > 0) {
+    if (outputs.length > 0 || fileContext.blocks.length > 0) {
       finalizeInboundContext(ctx, {
         forceBodyForAgent: true,
-        forceBodyForCommands: outputs.length > 0 || fileBlocks.length > 0,
+        forceBodyForCommands: outputs.length > 0 || fileContext.blocks.length > 0,
       });
     }
 
     return {
       outputs,
       decisions,
+      extractedFileImages: fileContext.images,
       appliedImage: outputs.some((output) => output.kind === "image.description"),
       appliedAudio: outputs.some((output) => output.kind === "audio.transcription"),
       appliedVideo: outputs.some((output) => output.kind === "video.description"),
-      appliedFile: fileBlocks.length > 0,
+      appliedFile: fileContext.blocks.length > 0,
     };
   } finally {
     await cache.cleanup();

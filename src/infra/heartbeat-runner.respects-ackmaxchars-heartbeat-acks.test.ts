@@ -1,10 +1,14 @@
+// Covers heartbeat ack truncation limits.
 import fs from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import { runHeartbeatOnce, type HeartbeatDeps } from "./heartbeat-runner.js";
 import { installHeartbeatRunnerTestRuntime } from "./heartbeat-runner.test-harness.js";
 import {
+  type HeartbeatReplySpy,
+  readSessionStoreForTest,
   seedMainSessionStore,
+  seedSessionStore,
   withTempHeartbeatSandbox,
   withTempTelegramHeartbeatSandbox,
 } from "./heartbeat-runner.test-utils.js";
@@ -75,10 +79,61 @@ describe("runHeartbeatOnce ack handling", () => {
     });
   }
 
+  function expectTelegramMessageSend(
+    send: ReturnType<typeof vi.fn>,
+    params: { to: string; text: string; cfg: OpenClawConfig },
+  ) {
+    expect(send.mock.calls).toEqual([
+      [
+        params.to,
+        params.text,
+        {
+          verbose: false,
+          cfg: params.cfg,
+          accountId: undefined,
+        },
+      ],
+    ]);
+  }
+
+  function expectWhatsAppMessageSend(
+    send: ReturnType<typeof vi.fn>,
+    params: { to: string; text: string; cfg: OpenClawConfig },
+  ) {
+    expect(send.mock.calls).toEqual([
+      [
+        params.to,
+        params.text,
+        {
+          verbose: false,
+          cfg: params.cfg,
+          accountId: undefined,
+          audioAsVoice: undefined,
+          deliveryPartIndex: 0,
+          deliveryQueueId: undefined,
+          forceDocument: undefined,
+          formatting: undefined,
+          gatewayClientScopes: undefined,
+          gifPlayback: undefined,
+          identity: undefined,
+          kind: "text",
+          mediaAccess: {},
+          mediaLocalRoots: undefined,
+          mediaReadFile: undefined,
+          onDeliveryResult: expect.any(Function),
+          onPlatformSendDispatch: expect.any(Function),
+          replyToIdSource: undefined,
+          replyToMode: undefined,
+          silent: undefined,
+        },
+      ],
+    ]);
+  }
+
   async function runTelegramHeartbeatWithDefaults(params: {
     tmpDir: string;
     storePath: string;
-    replySpy: ReturnType<typeof vi.spyOn>;
+    replySpy: HeartbeatReplySpy;
     replyText: string;
     messages?: Record<string, unknown>;
     telegramOverrides?: Record<string, unknown>;
@@ -108,9 +163,12 @@ describe("runHeartbeatOnce ack handling", () => {
     const sendTelegram = createMessageSendSpy();
     await runHeartbeatOnce({
       cfg,
-      deps: makeTelegramDeps({ sendTelegram }),
+      deps: {
+        ...makeTelegramDeps({ sendTelegram }),
+        getReplyFromConfig: params.replySpy,
+      },
     });
-    return sendTelegram;
+    return { sendTelegram, cfg };
   }
 
   function createWhatsAppHeartbeatConfig(params: {
@@ -170,7 +228,10 @@ describe("runHeartbeatOnce ack handling", () => {
 
       await runHeartbeatOnce({
         cfg,
-        deps: makeWhatsAppDeps({ sendWhatsApp }),
+        deps: {
+          ...makeWhatsAppDeps({ sendWhatsApp }),
+          getReplyFromConfig: replySpy,
+        },
       });
 
       expect(sendWhatsApp).toHaveBeenCalled();
@@ -196,11 +257,119 @@ describe("runHeartbeatOnce ack handling", () => {
 
       await runHeartbeatOnce({
         cfg,
-        deps: makeWhatsAppDeps({ sendWhatsApp }),
+        deps: {
+          ...makeWhatsAppDeps({ sendWhatsApp }),
+          getReplyFromConfig: replySpy,
+        },
       });
 
-      expect(sendWhatsApp).toHaveBeenCalledTimes(1);
-      expect(sendWhatsApp).toHaveBeenCalledWith(WHATSAPP_GROUP, "HEARTBEAT_OK", expect.any(Object));
+      expectWhatsAppMessageSend(sendWhatsApp, {
+        to: WHATSAPP_GROUP,
+        text: "HEARTBEAT_OK",
+        cfg,
+      });
+    });
+  });
+
+  it("records completed tasks when HEARTBEAT_OK delivery fails", async () => {
+    await withTempTelegramHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+      const nowMs = Date.parse("2026-07-06T12:00:00.000Z");
+      await fs.writeFile(
+        `${tmpDir}/HEARTBEAT.md`,
+        `tasks:
+  - name: check-deployment
+    interval: 5m
+    prompt: Check deployment status
+`,
+        "utf-8",
+      );
+      const cfg = createHeartbeatConfig({
+        tmpDir,
+        storePath,
+        heartbeat: { every: "5m", target: "telegram" },
+        channels: {
+          telegram: {
+            token: "test-token",
+            allowFrom: ["*"],
+            heartbeat: { showOk: true },
+          },
+        },
+      });
+      const sessionKey = await seedMainSessionStore(storePath, cfg, {
+        lastChannel: "telegram",
+        lastProvider: "telegram",
+        lastTo: TELEGRAM_GROUP,
+      });
+      replySpy.mockResolvedValue({ text: "HEARTBEAT_OK" });
+      const sendTelegram = vi.fn().mockRejectedValue(new Error("delivery unavailable"));
+
+      const result = await runHeartbeatOnce({
+        cfg,
+        deps: {
+          ...makeTelegramDeps({ sendTelegram, nowMs: () => nowMs }),
+          getReplyFromConfig: replySpy,
+        },
+      });
+
+      const sessionStore = readSessionStoreForTest<{
+        heartbeatTaskState?: Record<string, number>;
+      }>(storePath);
+      expect(result.status).toBe("ran");
+      expect(sendTelegram).toHaveBeenCalledTimes(1);
+      expect(sessionStore[sessionKey]?.heartbeatTaskState).toEqual({
+        "check-deployment": nowMs,
+      });
+    });
+  });
+
+  it("records completed tasks when HEARTBEAT_OK readiness checks fail", async () => {
+    await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+      const nowMs = Date.parse("2026-07-06T12:00:00.000Z");
+      await fs.writeFile(
+        `${tmpDir}/HEARTBEAT.md`,
+        `tasks:
+  - name: check-deployment
+    interval: 5m
+    prompt: Check deployment status
+`,
+        "utf-8",
+      );
+      const cfg = createWhatsAppHeartbeatConfig({
+        tmpDir,
+        storePath,
+        heartbeat: {},
+        visibility: { showOk: true },
+      });
+      const sessionKey = await seedMainSessionStore(storePath, cfg, {
+        lastChannel: "whatsapp",
+        lastProvider: "whatsapp",
+        lastTo: WHATSAPP_GROUP,
+      });
+      replySpy.mockResolvedValue({ text: "HEARTBEAT_OK" });
+      const sendWhatsApp = createMessageSendSpy();
+
+      const result = await runHeartbeatOnce({
+        cfg,
+        deps: {
+          ...makeWhatsAppDeps({
+            sendWhatsApp,
+            nowMs: () => nowMs,
+            webAuthExists: async () => {
+              throw new Error("readiness unavailable");
+            },
+          }),
+          getReplyFromConfig: replySpy,
+        },
+      });
+
+      const sessionStore = readSessionStoreForTest<{
+        heartbeatTaskState?: Record<string, number>;
+      }>(storePath);
+      expect(result.status).toBe("ran");
+      expect(sendWhatsApp).not.toHaveBeenCalled();
+      expect(sessionStore[sessionKey]?.heartbeatTaskState).toEqual({
+        "check-deployment": nowMs,
+      });
     });
   });
 
@@ -225,7 +394,7 @@ describe("runHeartbeatOnce ack handling", () => {
     },
   ])("$title", async ({ replyText, messages, expectedCalls, expectedText }) => {
     await withTempTelegramHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
-      const sendTelegram = await runTelegramHeartbeatWithDefaults({
+      const { sendTelegram, cfg } = await runTelegramHeartbeatWithDefaults({
         tmpDir,
         storePath,
         replySpy,
@@ -235,7 +404,11 @@ describe("runHeartbeatOnce ack handling", () => {
 
       expect(sendTelegram).toHaveBeenCalledTimes(expectedCalls);
       if (expectedText) {
-        expect(sendTelegram).toHaveBeenCalledWith(TELEGRAM_GROUP, expectedText, expect.any(Object));
+        expectTelegramMessageSend(sendTelegram, {
+          to: TELEGRAM_GROUP,
+          text: expectedText,
+          cfg,
+        });
       }
     });
   });
@@ -258,7 +431,10 @@ describe("runHeartbeatOnce ack handling", () => {
 
       const result = await runHeartbeatOnce({
         cfg,
-        deps: makeWhatsAppDeps({ sendWhatsApp }),
+        deps: {
+          ...makeWhatsAppDeps({ sendWhatsApp }),
+          getReplyFromConfig: replySpy,
+        },
       });
 
       expect(replySpy).not.toHaveBeenCalled();
@@ -279,7 +455,10 @@ describe("runHeartbeatOnce ack handling", () => {
 
       await runHeartbeatOnce({
         cfg,
-        deps: makeWhatsAppDeps({ sendWhatsApp }),
+        deps: {
+          ...makeWhatsAppDeps({ sendWhatsApp }),
+          getReplyFromConfig: replySpy,
+        },
       });
 
       expect(sendWhatsApp).not.toHaveBeenCalled();
@@ -303,27 +482,26 @@ describe("runHeartbeatOnce ack handling", () => {
       });
 
       replySpy.mockImplementationOnce(async () => {
-        const raw = await fs.readFile(storePath, "utf-8");
-        const parsed = JSON.parse(raw) as Record<string, { updatedAt?: number } | undefined>;
-        if (parsed[sessionKey]) {
-          parsed[sessionKey] = {
-            ...parsed[sessionKey],
+        const parsed = readSessionStoreForTest(storePath);
+        const current = parsed[sessionKey];
+        if (current) {
+          await seedSessionStore(storePath, sessionKey, {
+            ...current,
             updatedAt: bumpedUpdatedAt,
-          };
+          });
         }
-        await fs.writeFile(storePath, JSON.stringify(parsed, null, 2));
         return { text: "" };
       });
 
       await runHeartbeatOnce({
         cfg,
-        deps: makeWhatsAppDeps(),
+        deps: {
+          ...makeWhatsAppDeps(),
+          getReplyFromConfig: replySpy,
+        },
       });
 
-      const finalStore = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
-        string,
-        { updatedAt?: number } | undefined
-      >;
+      const finalStore = readSessionStoreForTest<{ updatedAt?: number }>(storePath);
       expect(finalStore[sessionKey]?.updatedAt).toBe(bumpedUpdatedAt);
     });
   });
@@ -340,15 +518,21 @@ describe("runHeartbeatOnce ack handling", () => {
 
       const res = await runHeartbeatOnce({
         cfg,
-        deps: makeWhatsAppDeps({
-          sendWhatsApp,
-          webAuthExists: async () => false,
-          hasActiveWebListener: () => false,
-        }),
+        deps: {
+          ...makeWhatsAppDeps({
+            sendWhatsApp,
+            webAuthExists: async () => false,
+            hasActiveWebListener: () => false,
+          }),
+          getReplyFromConfig: replySpy,
+        },
       });
 
       expect(res.status).toBe("skipped");
-      expect(res).toMatchObject({ reason: "whatsapp-not-linked" });
+      if (!("reason" in res)) {
+        throw new Error("expected skipped heartbeat result reason");
+      }
+      expect(res.reason).toBe("whatsapp-not-linked");
       expect(sendWhatsApp).not.toHaveBeenCalled();
     });
   });
@@ -376,15 +560,18 @@ describe("runHeartbeatOnce ack handling", () => {
 
       await runHeartbeatOnce({
         cfg,
-        deps: makeTelegramDeps({ sendTelegram }),
+        deps: {
+          ...makeTelegramDeps({ sendTelegram }),
+          getReplyFromConfig: replySpy,
+        },
       });
 
       expect(sendTelegram).toHaveBeenCalledTimes(1);
-      expect(sendTelegram).toHaveBeenCalledWith(
-        TELEGRAM_GROUP,
-        "Hello from heartbeat",
-        expect.objectContaining({ accountId: params.expectedAccountId, verbose: false }),
-      );
+      const [chatId, text, options] = sendTelegram.mock.calls[0] ?? [];
+      expect(chatId).toBe(TELEGRAM_GROUP);
+      expect(text).toBe("Hello from heartbeat");
+      expect(options?.accountId).toBe(params.expectedAccountId);
+      expect(options?.verbose).toBe(false);
     });
   }
 

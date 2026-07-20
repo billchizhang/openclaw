@@ -1,9 +1,11 @@
+// Tlon plugin module implements channel behavior.
 import crypto from "node:crypto";
 import type { ChannelAccountSnapshot } from "openclaw/plugin-sdk/channel-contract";
 import type { ChannelOutboundAdapter } from "openclaw/plugin-sdk/channel-send-result";
-import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { ChannelPlugin } from "openclaw/plugin-sdk/core";
-import { createLoggerBackedRuntime } from "openclaw/plugin-sdk/runtime";
+import { expectDefined } from "openclaw/plugin-sdk/expect-runtime";
+import { readResponseTextLimited } from "openclaw/plugin-sdk/provider-http";
 import { monitorTlonProvider } from "./monitor/index.js";
 import { tlonSetupWizard } from "./setup-surface.js";
 import {
@@ -15,7 +17,7 @@ import {
 import { configureClient } from "./tlon-api.js";
 import { resolveTlonAccount } from "./types.js";
 import { authenticate } from "./urbit/auth.js";
-import { ssrfPolicyFromAllowPrivateNetwork } from "./urbit/context.js";
+import { ssrfPolicyFromDangerouslyAllowPrivateNetwork } from "./urbit/context.js";
 import { urbitFetch } from "./urbit/fetch.js";
 import {
   buildMediaStory,
@@ -37,9 +39,11 @@ async function createHttpPokeApi(params: {
   url: string;
   code: string;
   ship: string;
-  allowPrivateNetwork?: boolean;
+  dangerouslyAllowPrivateNetwork?: boolean;
 }) {
-  const ssrfPolicy = ssrfPolicyFromAllowPrivateNetwork(params.allowPrivateNetwork);
+  const ssrfPolicy = ssrfPolicyFromDangerouslyAllowPrivateNetwork(
+    params.dangerouslyAllowPrivateNetwork,
+  );
   const cookie = await authenticate(params.url, params.code, { ssrfPolicy });
   const channelId = `${Math.floor(Date.now() / 1000)}-${crypto.randomUUID()}`;
   const channelPath = `/~/channel/${channelId}`;
@@ -64,7 +68,7 @@ async function createHttpPokeApi(params: {
           method: "PUT",
           headers: {
             "Content-Type": "application/json",
-            Cookie: cookie.split(";")[0],
+            Cookie: expectDefined(cookie.split(";").at(0), "cookie first segment"),
           },
           body: JSON.stringify([pokeData]),
         },
@@ -74,7 +78,7 @@ async function createHttpPokeApi(params: {
 
       try {
         if (!response.ok && response.status !== 204) {
-          const errorText = await response.text();
+          const errorText = await readResponseTextLimited(response, 16 * 1024);
           throw new Error(`Poke failed: ${response.status} - ${errorText}`);
         }
 
@@ -119,7 +123,7 @@ async function withHttpPokeAccountApi<T>(
     url: account.url,
     ship: account.ship,
     code: account.code,
-    allowPrivateNetwork: account.allowPrivateNetwork ?? undefined,
+    dangerouslyAllowPrivateNetwork: account.dangerouslyAllowPrivateNetwork ?? undefined,
   });
 
   try {
@@ -137,6 +141,15 @@ export const tlonRuntimeOutbound: ChannelOutboundAdapter = {
   deliveryMode: "direct",
   textChunkLimit: 10000,
   resolveTarget: ({ to }) => resolveTlonOutboundTarget(to),
+  deliveryCapabilities: {
+    durableFinal: {
+      text: true,
+      media: true,
+      replyTo: true,
+      thread: true,
+      messageSendingHooks: true,
+    },
+  },
   sendText: async ({ cfg, to, text, accountId, replyToId, threadId }) => {
     const { account, parsed } = resolveOutboundContext({ cfg, accountId, to });
     return withHttpPokeAccountApi(account, async (api) => {
@@ -167,7 +180,7 @@ export const tlonRuntimeOutbound: ChannelOutboundAdapter = {
       shipName: account.ship.replace(/^~/, ""),
       verbose: false,
       getCode: async () => account.code,
-      allowPrivateNetwork: account.allowPrivateNetwork ?? undefined,
+      dangerouslyAllowPrivateNetwork: account.dangerouslyAllowPrivateNetwork ?? undefined,
     });
 
     const uploadedUrl = mediaUrl ? await uploadImageFromUrl(mediaUrl) : undefined;
@@ -181,6 +194,7 @@ export const tlonRuntimeOutbound: ChannelOutboundAdapter = {
           fromShip,
           toShip: parsed.ship,
           story,
+          kind: "media",
         });
       }
       return await sendGroupMessageWithStory({
@@ -190,6 +204,7 @@ export const tlonRuntimeOutbound: ChannelOutboundAdapter = {
         channelName: parsed.channelName,
         story,
         replyToId: resolveReplyId(replyToId, threadId),
+        kind: "media",
       });
     });
   },
@@ -197,7 +212,9 @@ export const tlonRuntimeOutbound: ChannelOutboundAdapter = {
 
 export async function probeTlonAccount(account: ConfiguredTlonAccount) {
   try {
-    const ssrfPolicy = ssrfPolicyFromAllowPrivateNetwork(account.allowPrivateNetwork);
+    const ssrfPolicy = ssrfPolicyFromDangerouslyAllowPrivateNetwork(
+      account.dangerouslyAllowPrivateNetwork,
+    );
     const cookie = await authenticate(account.url, account.code, { ssrfPolicy });
     const { response, release } = await urbitFetch({
       baseUrl: account.url,
@@ -216,6 +233,11 @@ export async function probeTlonAccount(account: ConfiguredTlonAccount) {
       }
       return { ok: true };
     } finally {
+      // Guard release does not settle unread response streams; cancel first so
+      // the probe cannot leave its pinned connection open.
+      if (!response.bodyUsed) {
+        await response.body?.cancel().catch(() => undefined);
+      }
       await release();
     }
   } catch (error) {
@@ -224,7 +246,9 @@ export async function probeTlonAccount(account: ConfiguredTlonAccount) {
 }
 
 export async function startTlonGatewayAccount(
-  ctx: Parameters<NonNullable<NonNullable<ChannelPlugin["gateway"]>["startAccount"]>>[0],
+  ctx: Parameters<
+    NonNullable<NonNullable<ChannelPlugin<ResolvedTlonAccount>["gateway"]>["startAccount"]>
+  >[0],
 ) {
   const account = ctx.account;
   ctx.setStatus({

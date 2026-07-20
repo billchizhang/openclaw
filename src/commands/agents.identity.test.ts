@@ -1,21 +1,31 @@
+// Agent identity tests cover identity file creation, persistence, and command integration.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { makeTempWorkspace } from "../test-helpers/workspace.js";
 import { baseConfigSnapshot, createTestRuntime } from "./test-runtime-config-helpers.js";
 
-const configMocks = vi.hoisted(() => ({
-  readConfigFileSnapshot: vi.fn(),
-  writeConfigFile: vi.fn().mockResolvedValue(undefined),
-}));
+const TEST_MAX_IDENTITY_FILE_BYTES = 4 * 1024 * 1024;
 
-vi.mock("../config/config.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../config/config.js")>()),
+const configMocks = vi.hoisted(() => {
+  const writeConfigFile = vi.fn().mockResolvedValue(undefined);
+  return {
+    readConfigFileSnapshot: vi.fn(),
+    writeConfigFile,
+    replaceConfigFile: vi.fn(async (params: { nextConfig: unknown }) => {
+      await writeConfigFile(params.nextConfig);
+    }),
+  };
+});
+
+vi.mock("../config/config.js", async () => ({
+  ...(await vi.importActual<typeof import("../config/config.js")>("../config/config.js")),
   readConfigFileSnapshot: configMocks.readConfigFileSnapshot,
   writeConfigFile: configMocks.writeConfigFile,
+  replaceConfigFile: configMocks.replaceConfigFile,
 }));
 
-import { agentsSetIdentityCommand } from "./agents.js";
+import { agentsSetIdentityCommand } from "./agents.commands.identity.js";
 
 const runtime = createTestRuntime();
 type ConfigWritePayload = {
@@ -36,8 +46,12 @@ async function writeIdentityFile(workspace: string, lines: string[]) {
 }
 
 function getWrittenMainIdentity() {
-  const written = configMocks.writeConfigFile.mock.calls[0]?.[0] as ConfigWritePayload;
-  return written.agents?.list?.find((entry) => entry.id === "main")?.identity;
+  const [written] = configMocks.writeConfigFile.mock.calls[0] ?? [];
+  if (!written) {
+    throw new Error("expected written agent config");
+  }
+  const payload = written as ConfigWritePayload;
+  return payload.agents?.list?.find((entry) => entry.id === "main")?.identity;
 }
 
 async function runIdentityCommandFromWorkspace(workspace: string, fromIdentity = true) {
@@ -52,6 +66,7 @@ describe("agents set-identity command", () => {
   beforeEach(() => {
     configMocks.readConfigFileSnapshot.mockClear();
     configMocks.writeConfigFile.mockClear();
+    configMocks.replaceConfigFile.mockClear();
     runtime.log.mockClear();
     runtime.error.mockClear();
     runtime.exit.mockClear();
@@ -90,6 +105,25 @@ describe("agents set-identity command", () => {
     });
   });
 
+  it("resolves --from-identity against the selected agent workspace", async () => {
+    const { root, workspace } = await createIdentityWorkspace();
+    await writeIdentityFile(workspace, ["- Name: Workspace Agent"]);
+
+    configMocks.readConfigFileSnapshot.mockResolvedValue({
+      ...baseConfigSnapshot,
+      config: { agents: { list: [{ id: "main", workspace }] } },
+    });
+    const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(root);
+
+    try {
+      await agentsSetIdentityCommand({ agent: "main", fromIdentity: true }, runtime);
+    } finally {
+      cwdSpy.mockRestore();
+    }
+
+    expect(getWrittenMainIdentity()).toEqual({ name: "Workspace Agent" });
+  });
+
   it("errors when multiple agents match the same workspace", async () => {
     const { workspace } = await createIdentityWorkspace("shared");
     await writeIdentityFile(workspace, ["- Name: Echo"]);
@@ -108,7 +142,9 @@ describe("agents set-identity command", () => {
 
     await agentsSetIdentityCommand({ workspace }, runtime);
 
-    expect(runtime.error).toHaveBeenCalledWith(expect.stringContaining("Multiple agents match"));
+    expect(runtime.error).toHaveBeenCalledWith(
+      `Multiple agents match ${workspace}: main, ops. Pass --agent to choose one.`,
+    );
     expect(runtime.exit).toHaveBeenCalledWith(1);
     expect(configMocks.writeConfigFile).not.toHaveBeenCalled();
   });
@@ -199,12 +235,112 @@ describe("agents set-identity command", () => {
     });
   });
 
+  it("errors without changing config when --agent names an unknown agent", async () => {
+    configMocks.readConfigFileSnapshot.mockResolvedValue({
+      ...baseConfigSnapshot,
+      config: { agents: { list: [{ id: "main" }] } },
+    });
+
+    await agentsSetIdentityCommand({ agent: "ghostzzz", name: "Ghost" }, runtime);
+
+    expect(runtime.error).toHaveBeenCalledWith(
+      'Agent "ghostzzz" not found. Create it with `openclaw agents add`.',
+    );
+    expect(runtime.exit).toHaveBeenCalledWith(1);
+    expect(configMocks.writeConfigFile).not.toHaveBeenCalled();
+  });
+
+  it.each(["main", "openclaw", "crestodian"])(
+    "does not create absent reserved agent %s",
+    async (agentId) => {
+      configMocks.readConfigFileSnapshot.mockResolvedValue({
+        ...baseConfigSnapshot,
+        config: { agents: { list: [{ id: "ops" }] } },
+      });
+
+      await agentsSetIdentityCommand({ agent: agentId, name: "Hijack" }, runtime);
+
+      expect(runtime.error).toHaveBeenCalledWith(
+        `Agent "${agentId}" not found. Create it with \`openclaw agents add\`.`,
+      );
+      expect(runtime.exit).toHaveBeenCalledWith(1);
+      expect(configMocks.writeConfigFile).not.toHaveBeenCalled();
+    },
+  );
+
+  it("still updates a real existing agent", async () => {
+    configMocks.readConfigFileSnapshot.mockResolvedValue({
+      ...baseConfigSnapshot,
+      config: {
+        agents: {
+          list: [{ id: "ops", identity: { emoji: "🛠️" } }],
+        },
+      },
+    });
+
+    await agentsSetIdentityCommand({ agent: "ops", name: "Operator" }, runtime);
+
+    expect(configMocks.writeConfigFile).toHaveBeenCalledTimes(1);
+    const [written] = configMocks.writeConfigFile.mock.calls[0] ?? [];
+    expect(written).toMatchObject({
+      agents: {
+        list: [{ id: "ops", identity: { name: "Operator", emoji: "🛠️" } }],
+      },
+    });
+  });
+
+  it("still resolves and updates the implicit default agent by workspace", async () => {
+    const { workspace } = await createIdentityWorkspace("implicit-main");
+    configMocks.readConfigFileSnapshot.mockResolvedValue({
+      ...baseConfigSnapshot,
+      config: {
+        agents: {
+          defaults: { workspace },
+          list: [],
+        },
+      },
+    });
+
+    await agentsSetIdentityCommand({ workspace, name: "Default Agent" }, runtime);
+
+    expect(configMocks.writeConfigFile).toHaveBeenCalledTimes(1);
+    const [written] = configMocks.writeConfigFile.mock.calls[0] ?? [];
+    expect(written).toMatchObject({
+      agents: {
+        list: [{ id: "main", identity: { name: "Default Agent" } }],
+      },
+    });
+  });
+
+  it("errors when an explicit identity file exceeds the size cap", async () => {
+    const { workspace } = await createIdentityWorkspace();
+    const identityPath = await writeIdentityFile(workspace, [
+      "- Name: Oversized",
+      "x".repeat(TEST_MAX_IDENTITY_FILE_BYTES + 1),
+    ]);
+
+    configMocks.readConfigFileSnapshot.mockResolvedValue({
+      ...baseConfigSnapshot,
+      config: { agents: { list: [{ id: "main" }] } },
+    });
+
+    await agentsSetIdentityCommand({ agent: "main", identityFile: identityPath }, runtime);
+
+    expect(runtime.error).toHaveBeenCalledWith(
+      `Identity file ${identityPath} exceeds the maximum size of ${TEST_MAX_IDENTITY_FILE_BYTES} bytes`,
+    );
+    expect(runtime.exit).toHaveBeenCalledWith(1);
+    expect(configMocks.writeConfigFile).not.toHaveBeenCalled();
+  });
+
   it("errors when identity data is missing", async () => {
     const { workspace } = await createIdentityWorkspace();
 
     await runIdentityCommandFromWorkspace(workspace);
 
-    expect(runtime.error).toHaveBeenCalledWith(expect.stringContaining("No identity data found"));
+    expect(runtime.error).toHaveBeenCalledWith(
+      `No identity data found in ${path.join(workspace, "IDENTITY.md")}.`,
+    );
     expect(runtime.exit).toHaveBeenCalledWith(1);
     expect(configMocks.writeConfigFile).not.toHaveBeenCalled();
   });

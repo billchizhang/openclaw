@@ -6,18 +6,23 @@
  */
 
 import { describeAccountSnapshot } from "openclaw/plugin-sdk/account-helpers";
+import { buildChannelConfigSchema } from "openclaw/plugin-sdk/channel-config-schema";
+import {
+  buildChannelOutboundSessionRoute,
+  createChatChannelPlugin,
+  stripChannelTargetPrefix,
+} from "openclaw/plugin-sdk/channel-core";
+import { runPassiveAccountLifecycle } from "openclaw/plugin-sdk/channel-outbound";
 import {
   createLoggedPairingApprovalNotifier,
   createPairingPrefixStripper,
 } from "openclaw/plugin-sdk/channel-pairing";
-import { createChatChannelPlugin } from "openclaw/plugin-sdk/core";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { buildPassiveProbedChannelStatusSummary } from "openclaw/plugin-sdk/extension-shared";
 import {
   createComputedAccountStatusAdapter,
   createDefaultChannelRuntimeState,
 } from "openclaw/plugin-sdk/status-helpers";
-import type { OpenClawConfig } from "../api.js";
-import { buildChannelConfigSchema } from "../api.js";
 import { twitchMessageActions } from "./actions.js";
 import { removeClientManager } from "./client-manager-registry.js";
 import { TwitchConfigSchema } from "./config-schema.js";
@@ -25,10 +30,11 @@ import {
   DEFAULT_ACCOUNT_ID,
   getAccountConfig,
   listAccountIds,
+  resolveDefaultTwitchAccountId,
   resolveTwitchAccountContext,
   resolveTwitchSnapshotAccountId,
 } from "./config.js";
-import { twitchOutbound } from "./outbound.js";
+import { twitchMessageAdapter, twitchOutbound } from "./outbound.js";
 import { probeTwitch } from "./probe.js";
 import { resolveTwitchTargets } from "./resolver.js";
 import { twitchSetupAdapter, twitchSetupWizard } from "./setup-surface.js";
@@ -40,9 +46,20 @@ import type {
   ChannelResolveResult,
   TwitchAccountConfig,
 } from "./types.js";
-import { isAccountConfigured } from "./utils/twitch.js";
+import { isAccountConfigured, normalizeTwitchChannel } from "./utils/twitch.js";
 
 type ResolvedTwitchAccount = TwitchAccountConfig & { accountId?: string | null };
+
+function normalizeTwitchMessagingTarget(target: string): string {
+  const providerTarget = stripChannelTargetPrefix(target, "twitch", "twitch-chat");
+  const kindMatch = /^(user|dm|channel|group|conversation|room):/i.exec(providerTarget);
+  const kind = kindMatch?.[1]?.toLowerCase();
+  if (kind === "user" || kind === "dm") {
+    return "";
+  }
+  const channelTarget = kindMatch ? providerTarget.slice(kindMatch[0].length) : providerTarget;
+  return normalizeTwitchChannel(channelTarget);
+}
 
 /**
  * Twitch channel plugin.
@@ -77,11 +94,31 @@ export const twitchPlugin: ChannelPlugin<ResolvedTwitchAccount> =
       capabilities: {
         chatTypes: ["group"],
       },
+      messaging: {
+        resolveOutboundSessionRoute: ({ cfg, agentId, accountId, target }) => {
+          const channel = normalizeTwitchMessagingTarget(target);
+          if (!channel) {
+            return null;
+          }
+          return buildChannelOutboundSessionRoute({
+            cfg,
+            agentId,
+            channel: "twitch",
+            accountId,
+            recipientSessionExact: true,
+            peer: { kind: "group", id: channel },
+            chatType: "group",
+            from: `twitch:channel:${channel}`,
+            to: channel,
+          });
+        },
+      },
+      message: twitchMessageAdapter,
       configSchema: buildChannelConfigSchema(TwitchConfigSchema),
       config: {
         listAccountIds: (cfg: OpenClawConfig): string[] => listAccountIds(cfg),
         resolveAccount: (cfg: OpenClawConfig, accountId?: string | null): ResolvedTwitchAccount => {
-          const resolvedAccountId = accountId ?? DEFAULT_ACCOUNT_ID;
+          const resolvedAccountId = accountId ?? resolveDefaultTwitchAccountId(cfg);
           const account = getAccountConfig(cfg, resolvedAccountId);
           if (!account) {
             return {
@@ -98,9 +135,9 @@ export const twitchPlugin: ChannelPlugin<ResolvedTwitchAccount> =
             ...account,
           };
         },
-        defaultAccountId: (): string => DEFAULT_ACCOUNT_ID,
+        defaultAccountId: (cfg: OpenClawConfig): string => resolveDefaultTwitchAccountId(cfg),
         isConfigured: (_account: unknown, cfg: OpenClawConfig): boolean =>
-          resolveTwitchAccountContext(cfg, DEFAULT_ACCOUNT_ID).configured,
+          resolveTwitchAccountContext(cfg).configured,
         isEnabled: (account: ResolvedTwitchAccount | undefined): boolean =>
           account?.enabled !== false,
         describeAccount: (account: TwitchAccountConfig | undefined) =>
@@ -130,7 +167,7 @@ export const twitchPlugin: ChannelPlugin<ResolvedTwitchAccount> =
           kind: ChannelResolveKind;
           runtime: import("openclaw/plugin-sdk/runtime-env").RuntimeEnv;
         }): Promise<ChannelResolveResult[]> => {
-          const account = getAccountConfig(cfg, accountId ?? DEFAULT_ACCOUNT_ID);
+          const account = getAccountConfig(cfg, accountId ?? resolveDefaultTwitchAccountId(cfg));
           if (!account) {
             return inputs.map((input) => ({
               input,
@@ -178,15 +215,35 @@ export const twitchPlugin: ChannelPlugin<ResolvedTwitchAccount> =
 
           ctx.log?.info(`Starting Twitch connection for ${account.username}`);
 
-          // Lazy import: the monitor pulls the reply pipeline; avoid ESM init cycles.
-          const { monitorTwitchProvider } = await import("./monitor.js");
-          await monitorTwitchProvider({
-            account,
-            accountId,
-            config: ctx.cfg,
-            runtime: ctx.runtime,
-            abortSignal: ctx.abortSignal,
-          });
+          // Keep startAccount pending until abort fires; otherwise the channel
+          // supervisor reads the settled task as `channel exited without an
+          // error` and triggers a restart loop. See #60071.
+          try {
+            await runPassiveAccountLifecycle({
+              abortSignal: ctx.abortSignal,
+              start: async () => {
+                // Lazy import: the monitor pulls the reply pipeline; avoid ESM init cycles.
+                const { monitorTwitchProvider } = await import("./monitor.js");
+                return monitorTwitchProvider({
+                  account,
+                  accountId,
+                  config: ctx.cfg,
+                  runtime: ctx.runtime,
+                  abortSignal: ctx.abortSignal,
+                });
+              },
+              stop: async (monitor) => {
+                await monitor.stop();
+              },
+            });
+          } catch (error) {
+            ctx.setStatus?.({
+              accountId,
+              running: false,
+              lastStopAt: Date.now(),
+            });
+            throw error;
+          }
         },
         stopAccount: async (ctx): Promise<void> => {
           const account = ctx.account;

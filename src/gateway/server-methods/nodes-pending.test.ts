@@ -1,3 +1,8 @@
+/**
+ * Tests pending-node gateway method responses and state filtering.
+ */
+
+import { expectDefined } from "@openclaw/normalization-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { nodePendingHandlers } from "./nodes-pending.js";
 
@@ -41,8 +46,13 @@ function makeContext(overrides?: Partial<Record<string, unknown>>) {
       info: vi.fn(),
       warn: vi.fn(),
     },
+    getRuntimeConfig: () => ({}),
     ...overrides,
   };
+}
+
+function respondCall(respond: ReturnType<typeof vi.fn>): RespondCall | undefined {
+  return respond.mock.calls[0] as RespondCall | undefined;
 }
 
 describe("node.pending handlers", () => {
@@ -62,7 +72,10 @@ describe("node.pending handlers", () => {
     });
     const respond = vi.fn();
 
-    await nodePendingHandlers["node.pending.drain"]({
+    await expectDefined(
+      nodePendingHandlers["node.pending.drain"],
+      'nodePendingHandlers["node.pending.drain"] test invariant',
+    )({
       params: { maxItems: 3 },
       respond: respond as never,
       client: { connect: { device: { id: "ios-node-1" } } } as never,
@@ -90,7 +103,10 @@ describe("node.pending handlers", () => {
   it("rejects node.pending.drain without a connected device identity", async () => {
     const respond = vi.fn();
 
-    await nodePendingHandlers["node.pending.drain"]({
+    await expectDefined(
+      nodePendingHandlers["node.pending.drain"],
+      'nodePendingHandlers["node.pending.drain"] test invariant',
+    )({
       params: {},
       respond: respond as never,
       client: null,
@@ -99,7 +115,7 @@ describe("node.pending handlers", () => {
       isWebchatConnect: () => false,
     });
 
-    const call = respond.mock.calls[0] as RespondCall | undefined;
+    const call = respondCall(respond);
     expect(call?.[0]).toBe(false);
     expect(call?.[2]?.message).toContain("connected device identity");
   });
@@ -136,7 +152,10 @@ describe("node.pending handlers", () => {
     });
     const respond = vi.fn();
 
-    await nodePendingHandlers["node.pending.enqueue"]({
+    await expectDefined(
+      nodePendingHandlers["node.pending.enqueue"],
+      'nodePendingHandlers["node.pending.enqueue"] test invariant',
+    )({
       params: {
         nodeId: "ios-node-2",
         type: "location.request",
@@ -157,6 +176,7 @@ describe("node.pending handlers", () => {
     });
     expect(mocks.maybeWakeNodeWithApns).toHaveBeenCalledWith("ios-node-2", {
       wakeReason: "node.pending",
+      cfg: {},
     });
     expect(mocks.waitForNodeReconnect).toHaveBeenCalledWith({
       nodeId: "ios-node-2",
@@ -164,14 +184,13 @@ describe("node.pending handlers", () => {
       timeoutMs: 3_000,
     });
     expect(mocks.maybeSendNodeWakeNudge).not.toHaveBeenCalled();
-    expect(respond).toHaveBeenCalledWith(
-      true,
-      expect.objectContaining({
-        nodeId: "ios-node-2",
-        revision: 4,
-        wakeTriggered: true,
-      }),
-      undefined,
-    );
+    const call = respondCall(respond) as
+      | [boolean, { nodeId?: string; revision?: number; wakeTriggered?: boolean }, unknown?]
+      | undefined;
+    expect(call?.[0]).toBe(true);
+    expect(call?.[1]?.nodeId).toBe("ios-node-2");
+    expect(call?.[1]?.revision).toBe(4);
+    expect(call?.[1]?.wakeTriggered).toBe(true);
+    expect(call?.[2]).toBeUndefined();
   });
 });

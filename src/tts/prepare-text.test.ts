@@ -1,3 +1,4 @@
+// TTS prepare text tests cover text cleanup before speech synthesis.
 import { describe, expect, it } from "vitest";
 import { stripMarkdown } from "../shared/text/strip-markdown.js";
 
@@ -21,10 +22,28 @@ describe("TTS text preparation – stripMarkdown", () => {
     );
   });
 
+  it("preserves underscores inside words while still stripping italic markers", () => {
+    expect(stripMarkdown("here_is_a_message")).toBe("here_is_a_message");
+    expect(stripMarkdown("привет_мир_тест")).toBe("привет_мир_тест");
+    expect(stripMarkdown("東京_駅_前")).toBe("東京_駅_前");
+    expect(stripMarkdown("use foo_bar_baz and _italic_ text")).toBe(
+      "use foo_bar_baz and italic text",
+    );
+  });
+
   it("strips inline code markers before TTS", () => {
     expect(stripMarkdown("Use `consistent hashing` for distribution")).toBe(
       "Use consistent hashing for distribution",
     );
+  });
+
+  it("keeps explicit link destinations readable by default", () => {
+    expect(stripMarkdown("Read the [download](https://example.com/file)")).toBe(
+      "Read the download (https://example.com/file)",
+    );
+    expect(
+      stripMarkdown("Read the [download](https://example.com/file)", { linkStyle: "label" }),
+    ).toBe("Read the download");
   });
 
   it("handles a typical LLM reply with mixed markdown", () => {
