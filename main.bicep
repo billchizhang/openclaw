@@ -251,6 +251,38 @@ const fs = require('fs');
   if (fs.promises && fs.promises[f]) fs.promises[f] = async () => {};
 });
 EOF
+cat << 'EOF' > /tmp/repair-config.js
+const fs = require('fs');
+const configPath = '/home/node/.openclaw/openclaw.json';
+if (!fs.existsSync(configPath)) {
+  process.exit(0);
+}
+const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+if (cfg.meta && typeof cfg.meta === 'object') {
+  delete cfg.meta.lastTouchedAt;
+  if (Object.keys(cfg.meta).length === 0) {
+    delete cfg.meta;
+  }
+}
+if (cfg.commands && typeof cfg.commands === 'object') {
+  delete cfg.commands.ownerDisplay;
+  delete cfg.commands.ownerDisplaySecret;
+}
+if (Array.isArray(cfg.agents?.list)) {
+  const entries = cfg.agents.entries && typeof cfg.agents.entries === 'object'
+    ? { ...cfg.agents.entries }
+    : {};
+  for (const entry of cfg.agents.list) {
+    if (entry && typeof entry === 'object' && typeof entry.id === 'string' && entry.id.trim()) {
+      entries[entry.id] = { ...(entries[entry.id] ?? {}), ...entry };
+    }
+  }
+  cfg.agents.entries = entries;
+  delete cfg.agents.list;
+}
+fs.writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`);
+EOF
+export NODE_OPTIONS="--require /tmp/patch.js"
 set -e
 # SQLite on Azure File Share (SMB) causes "database is locked". Keep runtime DBs on local disk.
 LOCAL_RUNTIME=/tmp/openclaw-runtime
@@ -274,8 +306,9 @@ link_agent_sqlite_local() {
   done
 }
 mkdir -p /home/node/.openclaw/workspace
-# Repair legacy config keys persisted on the Azure File Share before config set calls.
-node --require /tmp/patch.js openclaw.mjs doctor --non-interactive --fix
+# Strip known-dead keys from the persisted Azure File Share config, then run doctor.
+node /tmp/repair-config.js
+node openclaw.mjs doctor --non-interactive --fix --yes
 cat << 'AGENTS_EOF' > /home/node/.openclaw/workspace/AGENTS.md
 # Agent Instructions
 
@@ -316,25 +349,27 @@ cat << 'HEARTBEAT_EOF' > /home/node/.openclaw/workspace/HEARTBEAT.md
 - Keep MEMORY.md concise: facts and decisions only, no raw transcript. Append; never overwrite existing entries.
 - If nothing new to curate, reply HEARTBEAT_OK.
 HEARTBEAT_EOF
-node --require /tmp/patch.js openclaw.mjs config set gateway.mode '"local"'
-node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.model '"openrouter/deepseek/deepseek-chat"'
-node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.isolatedSession true
-node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.lightContext true
-node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.every '"12h"'
-node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.target '"slack"'
-node --require /tmp/patch.js openclaw.mjs config set gateway.trustedProxies '["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]'
-node --require /tmp/patch.js openclaw.mjs config set gateway.controlUi.allowedOrigins "[\"$OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS\"]"
-node --require /tmp/patch.js openclaw.mjs config set channels.slack.enabled true
-node --require /tmp/patch.js openclaw.mjs config set channels.slack.dmPolicy '"open"'
-node --require /tmp/patch.js openclaw.mjs config set channels.slack.allowFrom "$OPENCLAW_SLACK_ALLOWED_MEMBERS"
-node --require /tmp/patch.js openclaw.mjs config set channels.slack.groupPolicy '"open"'
-node --require /tmp/patch.js openclaw.mjs config set tools.profile full
-node --require /tmp/patch.js openclaw.mjs mcp set rag-search '{"url":"https://retrieval-mcp-server.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
-node --require /tmp/patch.js openclaw.mjs mcp set asireon-function-call '{"url":"https://asireon-func-mcp.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
-node --require /tmp/patch.js openclaw.mjs config set agents.defaults.model.primary '"openrouter/deepseek/deepseek-v3.2"'
-node --require /tmp/patch.js openclaw.mjs config set 'agents.list[0]' '{"id":"planner","model":{"primary":"openrouter/deepseek/deepseek-v3.2"},"thinkingDefault":"high","subagents":{"allowAgents":["executor"]}}'
-node --require /tmp/patch.js openclaw.mjs config unset 'agents.list[0].model.fallback'
-node --require /tmp/patch.js openclaw.mjs config unset 'agents.list[0].model.fallbacks'
+node openclaw.mjs config set gateway.mode '"local"'
+node openclaw.mjs config set gateway.bind '"lan"'
+node openclaw.mjs config set agents.defaults.heartbeat.model '"openrouter/deepseek/deepseek-chat"'
+node openclaw.mjs config set agents.defaults.heartbeat.isolatedSession true
+node openclaw.mjs config set agents.defaults.heartbeat.lightContext true
+node openclaw.mjs config set agents.defaults.heartbeat.every '"12h"'
+node openclaw.mjs config set agents.defaults.heartbeat.target '"slack"'
+node openclaw.mjs config set gateway.trustedProxies '["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]'
+node openclaw.mjs config set gateway.controlUi.allowedOrigins "[\"$OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS\"]"
+node openclaw.mjs config set channels.slack.enabled true
+node openclaw.mjs config set channels.slack.dmPolicy '"open"'
+node openclaw.mjs config set channels.slack.allowFrom "$OPENCLAW_SLACK_ALLOWED_MEMBERS"
+node openclaw.mjs config set channels.slack.groupPolicy '"open"'
+node openclaw.mjs config set tools.profile full
+node openclaw.mjs mcp set rag-search '{"url":"https://retrieval-mcp-server.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
+node openclaw.mjs mcp set asireon-function-call '{"url":"https://asireon-func-mcp.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
+node openclaw.mjs config set agents.defaults.model.primary '"openrouter/deepseek/deepseek-v3.2"'
+node openclaw.mjs config set 'agents.entries.planner' '{"default":true,"model":{"primary":"openrouter/deepseek/deepseek-v3.2"},"thinkingDefault":"high","subagents":{"allowAgents":["executor"]}}'
+node openclaw.mjs config unset 'agents.entries.planner.model.fallback'
+node openclaw.mjs config unset 'agents.entries.planner.model.fallbacks'
+node openclaw.mjs config unset agents.list
 # Write API keys to auth-profiles.json so embedded agent runtime can resolve credentials
 mkdir -p /home/node/.openclaw/agents/main/agent
 link_agent_sqlite_local main
@@ -365,7 +400,7 @@ cat > /home/node/.openclaw/agents/main/agent/auth-profiles.json << EOF
   }
 }
 EOF
-node --require /tmp/patch.js openclaw.mjs config set 'agents.list[1]' '{"id":"executor","model":{"primary":"openai/gpt-5-mini"},"thinkingDefault":"adaptive"}'
+node openclaw.mjs config set 'agents.entries.executor' '{"model":{"primary":"openai/gpt-5-mini"},"thinkingDefault":"adaptive"}'
 mkdir -p /home/node/.openclaw/agents/executor/agent
 link_agent_sqlite_local executor
 mkdir -p /home/node/.openclaw/agents/planner/agent
@@ -411,25 +446,27 @@ EXECUTOR_EOF
 # Azure File Share mounts as 777 which triggers OpenClaw's world-writable
 # security check, so we use plugins.load.paths instead of copying to ~/.openclaw/extensions/.
 rm -rf /home/node/.openclaw/extensions/token-budget
-node --require /tmp/patch.js openclaw.mjs config set plugins.load.paths '["/app/custom-plugins/token-budget"]'
+node openclaw.mjs config set plugins.load.paths '["/app/custom-plugins/token-budget"]'
 # Clear any stale plugins.allow allowlist that may persist on the Azure File Share from prior deployments.
 # An allowlist with only "token-budget" would silently block all other bundled channel plugins (including Slack).
-node --require /tmp/patch.js openclaw.mjs config unset plugins.allow
+node openclaw.mjs config unset plugins.allow
 # Azure OpenAI provider for token budget fallback (must be configured before plugin refs it)
-node --require /tmp/patch.js openclaw.mjs config set models.providers.azure-openai-responses.api '"openai-responses"'
-node --require /tmp/patch.js openclaw.mjs config set models.providers.azure-openai-responses.models '["gpt-4o"]'
-node --require /tmp/patch.js openclaw.mjs config set models.providers.anthropic.baseUrl '"https://api.deepseek.com/anthropic"'
-node --require /tmp/patch.js openclaw.mjs config set models.providers.azure-openai-responses.baseUrl "$AZURE_OPENAI_BASE_URL"
-node --require /tmp/patch.js openclaw.mjs config set models.providers.azure-openai-responses.apiKey "$AZURE_OPENAI_API_KEY"
+node openclaw.mjs config set models.providers.azure-openai-responses.api '"openai-responses"'
+node openclaw.mjs config set models.providers.azure-openai-responses.models '["gpt-4o"]'
+node openclaw.mjs config set models.providers.anthropic.baseUrl '"https://api.deepseek.com/anthropic"'
+node openclaw.mjs config set models.providers.azure-openai-responses.baseUrl "$AZURE_OPENAI_BASE_URL"
+node openclaw.mjs config set models.providers.azure-openai-responses.apiKey "$AZURE_OPENAI_API_KEY"
 # Token budget plugin config (provider must exist before fallbackProvider is set)
-node --require /tmp/patch.js openclaw.mjs config set plugins.entries.token-budget.enabled true
-node --require /tmp/patch.js openclaw.mjs config set plugins.entries.token-budget.config.monthlyLimit 5000000
-node --require /tmp/patch.js openclaw.mjs config set plugins.entries.token-budget.config.warningThreshold 0.9
+node openclaw.mjs config set plugins.entries.token-budget.enabled true
+node openclaw.mjs config set plugins.entries.token-budget.config.monthlyLimit 5000000
+node openclaw.mjs config set plugins.entries.token-budget.config.warningThreshold 0.9
 # Use openai (bundled provider) as fallback — azure-openai-responses is a custom provider whose
 # apiKey is not reachable via env-var candidates for embedded agents, causing auth failure.
-node --require /tmp/patch.js openclaw.mjs config set plugins.entries.token-budget.config.fallbackProvider '"openai"'
-node --require /tmp/patch.js openclaw.mjs config set plugins.entries.token-budget.config.fallbackModel '"gpt-4o-mini"'
-exec node --require /tmp/patch.js openclaw.mjs gateway --allow-unconfigured --bind lan
+node openclaw.mjs config set plugins.entries.token-budget.config.fallbackProvider '"openai"'
+node openclaw.mjs config set plugins.entries.token-budget.config.fallbackModel '"gpt-4o-mini"'
+node /tmp/repair-config.js
+node openclaw.mjs doctor --non-interactive --fix --yes
+exec node openclaw.mjs gateway --allow-unconfigured --bind lan
             '''
           ]
           env: [
