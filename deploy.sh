@@ -9,9 +9,10 @@ IMAGE_NAME="${IMAGE_NAME:-openclaw}"
 SHA=$(git rev-parse HEAD)
 IMAGE_TAG="$REGISTRY_NAME.azurecr.io/$IMAGE_NAME:$SHA"
 
-# deepseek is an external official plugin excluded from core dist (see package.json "files").
-# Without this opt-in the deepseek/* model refs in main.bicep resolve to an unknown provider.
-OPENCLAW_EXTENSIONS="${OPENCLAW_EXTENSIONS:-deepseek}"
+# deepseek and slack are excluded from core dist (see the "files" denylist in package.json),
+# and the Docker prune step reads that same list. Without this opt-in the deepseek/* model refs
+# resolve to an unknown provider and the Slack channel never loads.
+OPENCLAW_EXTENSIONS="${OPENCLAW_EXTENSIONS:-deepseek,slack}"
 
 echo "🚀 Building AMD64 Docker image: $IMAGE_TAG"
 echo "   Bundled extensions: $OPENCLAW_EXTENSIONS"

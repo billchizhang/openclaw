@@ -36,10 +36,6 @@ param anthropicApiKey string
 @secure()
 param geminiApiKey string
 
-@description('OpenRouter API Key for DeepSeek and other models')
-@secure()
-param openRouterApiKey string
-
 @description('DeepSeek API Key for the native deepseek provider (platform.deepseek.com).')
 @secure()
 param deepSeekApiKey string
@@ -203,10 +199,6 @@ resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
         {
           name: 'gemini-api-key'
           value: geminiApiKey
-        }
-        {
-          name: 'openrouter-api-key'
-          value: openRouterApiKey
         }
         {
           name: 'deepseek-api-key'
@@ -412,11 +404,6 @@ cat > /home/node/.openclaw/agents/main/agent/auth-profiles.json << EOF
       "provider": "deepseek",
       "key": "$DEEPSEEK_API_KEY"
     },
-    "openrouter:default": {
-      "type": "api_key",
-      "provider": "openrouter",
-      "key": "$OPENROUTER_API_KEY"
-    },
     "openai:default": {
       "type": "api_key",
       "provider": "openai",
@@ -508,13 +495,11 @@ exec node openclaw.mjs gateway --allow-unconfigured --bind lan
           ]
           env: [
             // Core Security
+            // Must be OPENCLAW_GATEWAY_TOKEN: the gateway credential planner reads only that
+            // name, so any other spelling leaves the gateway unauthenticated behind ingress.
             {
-              name: 'OPENCLAW_GATEWAY_AUTH_TOKEN'
+              name: 'OPENCLAW_GATEWAY_TOKEN'
               secretRef: 'gateway-token'
-            }
-            {
-              name: 'OPENCLAW_CONTROL_UI_ALLOW_INSECURE_AUTH'
-              value: 'false' // Requires gateway-token auth via the Control UI
             }
 
             // Slack Integration
@@ -541,23 +526,14 @@ exec node openclaw.mjs gateway --allow-unconfigured --bind lan
               secretRef: 'gemini-api-key'
             }
             {
-              name: 'OPENROUTER_API_KEY'
-              secretRef: 'openrouter-api-key'
-            }
-            {
               name: 'DEEPSEEK_API_KEY'
               secretRef: 'deepseek-api-key'
             }
 
-            // Model Routing Assignments
-            {
-              name: 'OPENCLAW_AGENTS_DEFAULTS_MODEL_PRIMARY'
-              value: 'deepseek/deepseek-v4-pro' // Deep Thinking Brain
-            }
-            {
-              name: 'OPENCLAW_AGENTS_DEFAULTS_MODEL_FAST'
-              value: 'openai/gpt-5.4-mini' // Fast Execution Brain
-            }
+            // The two variables below are read by the startup script as shell inputs to
+            // `config set`, not by OpenClaw itself. Apart from OPENCLAW_GATEWAY_TOKEN there is
+            // no generic OPENCLAW_*-to-config override, so env vars named after config paths
+            // (model routing, Control UI auth) are silently ignored and must go through config.
 
             // UI Origin Configuration
             {
