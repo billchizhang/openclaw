@@ -40,6 +40,10 @@ param geminiApiKey string
 @secure()
 param openRouterApiKey string
 
+@description('DeepSeek API Key for the native deepseek provider (platform.deepseek.com).')
+@secure()
+param deepSeekApiKey string
+
 @description('Slack App Token (starts with xapp-) for socket mode')
 @secure()
 param slackAppToken string
@@ -205,6 +209,10 @@ resource openclawApp 'Microsoft.App/containerApps@2023-05-01' = {
           value: openRouterApiKey
         }
         {
+          name: 'deepseek-api-key'
+          value: deepSeekApiKey
+        }
+        {
           name: 'slack-app-token'
           value: slackAppToken
         }
@@ -268,17 +276,39 @@ if (cfg.commands && typeof cfg.commands === 'object') {
   delete cfg.commands.ownerDisplay;
   delete cfg.commands.ownerDisplaySecret;
 }
-if (Array.isArray(cfg.agents?.list)) {
+if (cfg.agents && typeof cfg.agents === 'object') {
   const entries = cfg.agents.entries && typeof cfg.agents.entries === 'object'
     ? { ...cfg.agents.entries }
     : {};
-  for (const entry of cfg.agents.list) {
-    if (entry && typeof entry === 'object' && typeof entry.id === 'string' && entry.id.trim()) {
-      entries[entry.id] = { ...(entries[entry.id] ?? {}), ...entry };
+  if (Array.isArray(cfg.agents.list)) {
+    for (const entry of cfg.agents.list) {
+      if (entry && typeof entry === 'object' && typeof entry.id === 'string' && entry.id.trim()) {
+        entries[entry.id] = { ...(entries[entry.id] ?? {}), ...entry };
+      }
+    }
+    delete cfg.agents.list;
+  }
+  // The entry key is the agent id; the keyed schema rejects a nested "id" field.
+  for (const entry of Object.values(entries)) {
+    if (entry && typeof entry === 'object') {
+      delete entry.id;
     }
   }
-  cfg.agents.entries = entries;
-  delete cfg.agents.list;
+  const ids = Object.keys(entries).filter((id) => entries[id] && typeof entries[id] === 'object');
+  if (ids.length > 0) {
+    // Schema requires exactly one default=true entry. Prefer planner over any stale
+    // default carried on the Azure File Share, which would otherwise win by key order.
+    const defaults = ids.filter((id) => entries[id].default === true);
+    const chosen = ids.includes('planner') ? 'planner' : (defaults[0] ?? ids[0]);
+    for (const id of ids) {
+      if (id === chosen) {
+        entries[id].default = true;
+      } else {
+        delete entries[id].default;
+      }
+    }
+    cfg.agents.entries = entries;
+  }
 }
 fs.writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`);
 EOF
@@ -351,7 +381,7 @@ cat << 'HEARTBEAT_EOF' > /home/node/.openclaw/workspace/HEARTBEAT.md
 HEARTBEAT_EOF
 node openclaw.mjs config set gateway.mode '"local"'
 node openclaw.mjs config set gateway.bind '"lan"'
-node openclaw.mjs config set agents.defaults.heartbeat.model '"openrouter/deepseek/deepseek-chat"'
+node openclaw.mjs config set agents.defaults.heartbeat.model '"deepseek/deepseek-v4-flash"'
 node openclaw.mjs config set agents.defaults.heartbeat.isolatedSession true
 node openclaw.mjs config set agents.defaults.heartbeat.lightContext true
 node openclaw.mjs config set agents.defaults.heartbeat.every '"12h"'
@@ -365,8 +395,8 @@ node openclaw.mjs config set channels.slack.groupPolicy '"open"'
 node openclaw.mjs config set tools.profile full
 node openclaw.mjs mcp set rag-search '{"url":"https://retrieval-mcp-server.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
 node openclaw.mjs mcp set asireon-function-call '{"url":"https://asireon-func-mcp.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
-node openclaw.mjs config set agents.defaults.model.primary '"openrouter/deepseek/deepseek-v3.2"'
-node openclaw.mjs config set 'agents.entries.planner' '{"default":true,"model":{"primary":"openrouter/deepseek/deepseek-v3.2"},"thinkingDefault":"high","subagents":{"allowAgents":["executor"]}}'
+node openclaw.mjs config set agents.defaults.model.primary '"deepseek/deepseek-v4-pro"'
+node openclaw.mjs config set 'agents.entries.planner' '{"default":true,"workspace":"/home/node/.openclaw/workspace-planner","model":{"primary":"deepseek/deepseek-v4-pro"},"thinkingDefault":"high","subagents":{"allowAgents":["executor"]}}'
 node openclaw.mjs config unset 'agents.entries.planner.model.fallback'
 node openclaw.mjs config unset 'agents.entries.planner.model.fallbacks'
 node openclaw.mjs config unset agents.list
@@ -377,6 +407,11 @@ cat > /home/node/.openclaw/agents/main/agent/auth-profiles.json << EOF
 {
   "version": 1,
   "profiles": {
+    "deepseek:default": {
+      "type": "api_key",
+      "provider": "deepseek",
+      "key": "$DEEPSEEK_API_KEY"
+    },
     "openrouter:default": {
       "type": "api_key",
       "provider": "openrouter",
@@ -400,14 +435,16 @@ cat > /home/node/.openclaw/agents/main/agent/auth-profiles.json << EOF
   }
 }
 EOF
-node openclaw.mjs config set 'agents.entries.executor' '{"model":{"primary":"openai/gpt-5-mini"},"thinkingDefault":"adaptive"}'
+node openclaw.mjs config set 'agents.entries.executor' '{"workspace":"/home/node/.openclaw/workspace-executor","model":{"primary":"openai/gpt-5.4-mini"},"thinkingDefault":"adaptive"}'
 mkdir -p /home/node/.openclaw/agents/executor/agent
 link_agent_sqlite_local executor
 mkdir -p /home/node/.openclaw/agents/planner/agent
 link_agent_sqlite_local planner
-if [ -f /home/node/.openclaw/agents/main/agent/auth-profiles.json ]; then
-  cp -f /home/node/.openclaw/agents/main/agent/auth-profiles.json /home/node/.openclaw/agents/planner/agent/auth-profiles.json
-fi
+# Every agent resolves credentials from its own auth-profiles.json; main is the source of truth.
+for agent_id in planner executor; do
+  cp -f /home/node/.openclaw/agents/main/agent/auth-profiles.json \
+    "/home/node/.openclaw/agents/$agent_id/agent/auth-profiles.json"
+done
 mkdir -p /home/node/.openclaw/workspace-planner
 touch /home/node/.openclaw/workspace-planner/BOOTSTRAP.md
 cat << 'PLANNER_EOF' > /home/node/.openclaw/workspace-planner/AGENTS.md
@@ -450,20 +487,20 @@ node openclaw.mjs config set plugins.load.paths '["/app/custom-plugins/token-bud
 # Clear any stale plugins.allow allowlist that may persist on the Azure File Share from prior deployments.
 # An allowlist with only "token-budget" would silently block all other bundled channel plugins (including Slack).
 node openclaw.mjs config unset plugins.allow
-# Azure OpenAI provider for token budget fallback (must be configured before plugin refs it)
+# Azure OpenAI provider for token budget fallback (must be configured before plugin refs it).
+# models[] entries are objects; a bare ["gpt-4o"] string array fails schema validation.
 node openclaw.mjs config set models.providers.azure-openai-responses.api '"openai-responses"'
-node openclaw.mjs config set models.providers.azure-openai-responses.models '["gpt-4o"]'
-node openclaw.mjs config set models.providers.anthropic.baseUrl '"https://api.deepseek.com/anthropic"'
+node openclaw.mjs config set models.providers.azure-openai-responses.models '[{"id":"gpt-4o","name":"GPT-4o"}]'
 node openclaw.mjs config set models.providers.azure-openai-responses.baseUrl "$AZURE_OPENAI_BASE_URL"
 node openclaw.mjs config set models.providers.azure-openai-responses.apiKey "$AZURE_OPENAI_API_KEY"
 # Token budget plugin config (provider must exist before fallbackProvider is set)
 node openclaw.mjs config set plugins.entries.token-budget.enabled true
 node openclaw.mjs config set plugins.entries.token-budget.config.monthlyLimit 5000000
 node openclaw.mjs config set plugins.entries.token-budget.config.warningThreshold 0.9
-# Use openai (bundled provider) as fallback — azure-openai-responses is a custom provider whose
-# apiKey is not reachable via env-var candidates for embedded agents, causing auth failure.
-node openclaw.mjs config set plugins.entries.token-budget.config.fallbackProvider '"openai"'
-node openclaw.mjs config set plugins.entries.token-budget.config.fallbackModel '"gpt-4o-mini"'
+# Fall back to the Azure OpenAI deployment provisioned by this template. The provider carries an
+# explicit apiKey above, so embedded agents do not depend on env-var credential discovery.
+node openclaw.mjs config set plugins.entries.token-budget.config.fallbackProvider '"azure-openai-responses"'
+node openclaw.mjs config set plugins.entries.token-budget.config.fallbackModel '"gpt-4o"'
 node /tmp/repair-config.js
 node openclaw.mjs doctor --non-interactive --fix --yes
 exec node openclaw.mjs gateway --allow-unconfigured --bind lan
@@ -507,15 +544,19 @@ exec node openclaw.mjs gateway --allow-unconfigured --bind lan
               name: 'OPENROUTER_API_KEY'
               secretRef: 'openrouter-api-key'
             }
+            {
+              name: 'DEEPSEEK_API_KEY'
+              secretRef: 'deepseek-api-key'
+            }
 
             // Model Routing Assignments
             {
               name: 'OPENCLAW_AGENTS_DEFAULTS_MODEL_PRIMARY'
-              value: 'openrouter/deepseek/deepseek-v3.2' // Deep Thinking Brain
+              value: 'deepseek/deepseek-v4-pro' // Deep Thinking Brain
             }
             {
               name: 'OPENCLAW_AGENTS_DEFAULTS_MODEL_FAST'
-              value: 'openai/gpt-5-mini' // Fast Execution Brain
+              value: 'openai/gpt-5.4-mini' // Fast Execution Brain
             }
 
             // UI Origin Configuration
