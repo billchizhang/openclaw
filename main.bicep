@@ -251,7 +251,31 @@ const fs = require('fs');
   if (fs.promises && fs.promises[f]) fs.promises[f] = async () => {};
 });
 EOF
+set -e
+# SQLite on Azure File Share (SMB) causes "database is locked". Keep runtime DBs on local disk.
+LOCAL_RUNTIME=/tmp/openclaw-runtime
+mkdir -p "$LOCAL_RUNTIME/state"
+if [ -d /home/node/.openclaw/state ] && [ ! -L /home/node/.openclaw/state ]; then
+  rm -rf /home/node/.openclaw/state
+fi
+ln -sfn "$LOCAL_RUNTIME/state" /home/node/.openclaw/state
+link_agent_sqlite_local() {
+  agent_id="$1"
+  agent_dir="/home/node/.openclaw/agents/$agent_id/agent"
+  local_dir="$LOCAL_RUNTIME/agents/$agent_id/agent"
+  mkdir -p "$local_dir" "$agent_dir"
+  for f in openclaw-agent.sqlite openclaw-agent.sqlite-wal openclaw-agent.sqlite-shm; do
+    if [ -e "$agent_dir/$f" ] && [ ! -L "$agent_dir/$f" ]; then
+      rm -f "$agent_dir/$f"
+    fi
+    if [ ! -e "$agent_dir/$f" ]; then
+      ln -sfn "$local_dir/$f" "$agent_dir/$f"
+    fi
+  done
+}
 mkdir -p /home/node/.openclaw/workspace
+# Repair legacy config keys persisted on the Azure File Share before config set calls.
+node --require /tmp/patch.js openclaw.mjs doctor --non-interactive --fix
 cat << 'AGENTS_EOF' > /home/node/.openclaw/workspace/AGENTS.md
 # Agent Instructions
 
@@ -292,6 +316,7 @@ cat << 'HEARTBEAT_EOF' > /home/node/.openclaw/workspace/HEARTBEAT.md
 - Keep MEMORY.md concise: facts and decisions only, no raw transcript. Append; never overwrite existing entries.
 - If nothing new to curate, reply HEARTBEAT_OK.
 HEARTBEAT_EOF
+node --require /tmp/patch.js openclaw.mjs config set gateway.mode '"local"'
 node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.model '"openrouter/deepseek/deepseek-chat"'
 node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.isolatedSession true
 node --require /tmp/patch.js openclaw.mjs config set agents.defaults.heartbeat.lightContext true
@@ -312,6 +337,7 @@ node --require /tmp/patch.js openclaw.mjs config unset 'agents.list[0].model.fal
 node --require /tmp/patch.js openclaw.mjs config unset 'agents.list[0].model.fallbacks'
 # Write API keys to auth-profiles.json so embedded agent runtime can resolve credentials
 mkdir -p /home/node/.openclaw/agents/main/agent
+link_agent_sqlite_local main
 cat > /home/node/.openclaw/agents/main/agent/auth-profiles.json << EOF
 {
   "version": 1,
@@ -340,7 +366,10 @@ cat > /home/node/.openclaw/agents/main/agent/auth-profiles.json << EOF
 }
 EOF
 node --require /tmp/patch.js openclaw.mjs config set 'agents.list[1]' '{"id":"executor","model":{"primary":"openai/gpt-5-mini"},"thinkingDefault":"adaptive"}'
+mkdir -p /home/node/.openclaw/agents/executor/agent
+link_agent_sqlite_local executor
 mkdir -p /home/node/.openclaw/agents/planner/agent
+link_agent_sqlite_local planner
 if [ -f /home/node/.openclaw/agents/main/agent/auth-profiles.json ]; then
   cp -f /home/node/.openclaw/agents/main/agent/auth-profiles.json /home/node/.openclaw/agents/planner/agent/auth-profiles.json
 fi
