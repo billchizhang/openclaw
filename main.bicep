@@ -257,7 +257,20 @@ const configPath = '/home/node/.openclaw/openclaw.json';
 if (!fs.existsSync(configPath)) {
   process.exit(0);
 }
-const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+// A container killed mid-write leaves truncated JSON on the file share. Parsing that would abort
+// startup under `set -e`, so fall back to the backup and let doctor rebuild from a clean slate.
+function readConfig(candidatePath) {
+  try {
+    return JSON.parse(fs.readFileSync(candidatePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+const cfg = readConfig(configPath) ?? readConfig(`${configPath}.bak`);
+if (!cfg || typeof cfg !== 'object') {
+  console.error('WARN: openclaw.json unreadable; leaving it for doctor to rebuild.');
+  process.exit(0);
+}
 if (cfg.meta && typeof cfg.meta === 'object') {
   delete cfg.meta.lastTouchedAt;
   if (Object.keys(cfg.meta).length === 0) {
@@ -306,27 +319,33 @@ fs.writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`);
 EOF
 export NODE_OPTIONS="--require /tmp/patch.js"
 set -e
-# SQLite on Azure File Share (SMB) causes "database is locked". Keep runtime DBs on local disk.
-LOCAL_RUNTIME=/tmp/openclaw-runtime
-mkdir -p "$LOCAL_RUNTIME/state"
-if [ -d /home/node/.openclaw/state ] && [ ! -L /home/node/.openclaw/state ]; then
-  rm -rf /home/node/.openclaw/state
+# SQLite lives on the Azure File Share so credentials, sessions, cron jobs, and device pairings
+# survive restarts. OpenClaw classifies the CIFS mount and forces rollback journaling instead of
+# WAL, which is what avoids the SMB "database is locked" failures.
+# Earlier revisions symlinked these onto ephemeral local disk; undo that on upgrade.
+if [ -L /home/node/.openclaw/state ]; then
+  rm -f /home/node/.openclaw/state
 fi
-ln -sfn "$LOCAL_RUNTIME/state" /home/node/.openclaw/state
-link_agent_sqlite_local() {
-  agent_id="$1"
-  agent_dir="/home/node/.openclaw/agents/$agent_id/agent"
-  local_dir="$LOCAL_RUNTIME/agents/$agent_id/agent"
-  mkdir -p "$local_dir" "$agent_dir"
+mkdir -p /home/node/.openclaw/state
+unlink_agent_sqlite_symlinks() {
+  agent_dir="/home/node/.openclaw/agents/$1/agent"
+  mkdir -p "$agent_dir"
   for f in openclaw-agent.sqlite openclaw-agent.sqlite-wal openclaw-agent.sqlite-shm; do
-    if [ -e "$agent_dir/$f" ] && [ ! -L "$agent_dir/$f" ]; then
+    if [ -L "$agent_dir/$f" ]; then
       rm -f "$agent_dir/$f"
-    fi
-    if [ ! -e "$agent_dir/$f" ]; then
-      ln -sfn "$local_dir/$f" "$agent_dir/$f"
     fi
   done
 }
+for agent_id in main planner executor; do
+  unlink_agent_sqlite_symlinks "$agent_id"
+done
+# Retired credential files are detected by NAME ONLY and hard-fail every auth load with
+# AuthProfileMigrationRequiredError, even when the SQLite store is healthy. Doctor itself loads
+# auth during its checks, so these must be gone before the first doctor run, not after. Keys are
+# re-seeded from env into SQLite below, so deleting them loses nothing.
+rm -f /home/node/.openclaw/agents/*/agent/auth-profiles.json \
+      /home/node/.openclaw/agents/*/agent/auth.json \
+      /home/node/.openclaw/agents/*/agent/auth-state.json
 mkdir -p /home/node/.openclaw/workspace
 # Strip known-dead keys from the persisted Azure File Share config, then run doctor.
 node /tmp/repair-config.js
@@ -392,46 +411,27 @@ node openclaw.mjs config set 'agents.entries.planner' '{"default":true,"workspac
 node openclaw.mjs config unset 'agents.entries.planner.model.fallback'
 node openclaw.mjs config unset 'agents.entries.planner.model.fallbacks'
 node openclaw.mjs config unset agents.list
-# Write API keys to auth-profiles.json so embedded agent runtime can resolve credentials
-mkdir -p /home/node/.openclaw/agents/main/agent
-link_agent_sqlite_local main
-cat > /home/node/.openclaw/agents/main/agent/auth-profiles.json << EOF
-{
-  "version": 1,
-  "profiles": {
-    "deepseek:default": {
-      "type": "api_key",
-      "provider": "deepseek",
-      "key": "$DEEPSEEK_API_KEY"
-    },
-    "openai:default": {
-      "type": "api_key",
-      "provider": "openai",
-      "key": "$OPENAI_API_KEY"
-    },
-    "anthropic:default": {
-      "type": "api_key",
-      "provider": "anthropic",
-      "key": "$ANTHROPIC_API_KEY"
-    },
-    "google:default": {
-      "type": "api_key",
-      "provider": "google",
-      "key": "$GEMINI_API_KEY"
-    }
-  }
-}
-EOF
 node openclaw.mjs config set 'agents.entries.executor' '{"workspace":"/home/node/.openclaw/workspace-executor","model":{"primary":"openai/gpt-5.4-mini"},"thinkingDefault":"adaptive"}'
-mkdir -p /home/node/.openclaw/agents/executor/agent
-link_agent_sqlite_local executor
-mkdir -p /home/node/.openclaw/agents/planner/agent
-link_agent_sqlite_local planner
-# Every agent resolves credentials from its own auth-profiles.json; main is the source of truth.
-for agent_id in planner executor; do
-  cp -f /home/node/.openclaw/agents/main/agent/auth-profiles.json \
-    "/home/node/.openclaw/agents/$agent_id/agent/auth-profiles.json"
-done
+# Seed API keys straight into each agent's SQLite auth store. paste-api-key reads the secret from
+# piped stdin when stdin is not a TTY, so no key is ever passed as an argument or written to disk.
+seed_credential() {
+  agent_id="$1"
+  provider="$2"
+  key="$3"
+  if [ -z "$key" ]; then
+    return 0
+  fi
+  if ! printf '%s' "$key" | node openclaw.mjs models auth --agent "$agent_id" paste-api-key \
+    --provider "$provider" --profile-id "$provider:default" >/dev/null; then
+    echo "WARN: failed to seed $provider credentials for agent $agent_id" >&2
+  fi
+}
+seed_agent_credentials() {
+  seed_credential "$1" deepseek "$DEEPSEEK_API_KEY"
+  seed_credential "$1" openai "$OPENAI_API_KEY"
+  seed_credential "$1" anthropic "$ANTHROPIC_API_KEY"
+  seed_credential "$1" google "$GEMINI_API_KEY"
+}
 mkdir -p /home/node/.openclaw/workspace-planner
 touch /home/node/.openclaw/workspace-planner/BOOTSTRAP.md
 cat << 'PLANNER_EOF' > /home/node/.openclaw/workspace-planner/AGENTS.md
@@ -492,6 +492,14 @@ node openclaw.mjs config set plugins.entries.token-budget.config.fallbackProvide
 node openclaw.mjs config set plugins.entries.token-budget.config.fallbackModel '"gpt-4o"'
 node /tmp/repair-config.js
 node openclaw.mjs doctor --non-interactive --fix --yes
+# Must run after doctor: a leftover legacy credential file makes every auth-store write fail,
+# and the agent SQLite stores live on ephemeral local disk, so they start empty on each boot.
+for agent_id in main planner executor; do
+  seed_agent_credentials "$agent_id"
+done
+# Re-assert last: the gateway start guard refuses to boot without gateway.mode, and doctor
+# rewrites the whole config file after every repair pass.
+node openclaw.mjs config set gateway.mode '"local"'
 exec node openclaw.mjs gateway --allow-unconfigured --bind lan
             '''
           ]
