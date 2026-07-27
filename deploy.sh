@@ -9,10 +9,11 @@ IMAGE_NAME="${IMAGE_NAME:-openclaw}"
 SHA=$(git rev-parse HEAD)
 IMAGE_TAG="$REGISTRY_NAME.azurecr.io/$IMAGE_NAME:$SHA"
 
-# deepseek and slack are excluded from core dist (see the "files" denylist in package.json),
-# and the Docker prune step reads that same list. Without this opt-in the deepseek/* model refs
-# resolve to an unknown provider and the Slack channel never loads.
-OPENCLAW_EXTENSIONS="${OPENCLAW_EXTENSIONS:-deepseek,slack}"
+# These plugins are excluded from core dist (see the "files" denylist in package.json) and the
+# Docker prune step reads that same list. They must be baked into the image at 755: Azure Files
+# mounts the state dir as 777, and OpenClaw's discovery gate blocks world-writable plugin paths,
+# so `openclaw plugins install` can never produce a loadable plugin on this deployment.
+OPENCLAW_EXTENSIONS="${OPENCLAW_EXTENSIONS:-deepseek,slack,codex,perplexity}"
 
 echo "🚀 Building AMD64 Docker image: $IMAGE_TAG"
 echo "   Bundled extensions: $OPENCLAW_EXTENSIONS"

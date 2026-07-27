@@ -474,6 +474,8 @@ node openclaw.mjs config set plugins.load.paths '["/app/custom-plugins/token-bud
 # Clear any stale plugins.allow allowlist that may persist on the Azure File Share from prior deployments.
 # An allowlist with only "token-budget" would silently block all other bundled channel plugins (including Slack).
 node openclaw.mjs config unset plugins.allow
+# whatsapp is an external plugin that was never installed here; the stale entry only emits a warning.
+node openclaw.mjs config unset plugins.entries.whatsapp
 # Azure OpenAI provider for token budget fallback (must be configured before plugin refs it).
 # models[] entries are objects; a bare ["gpt-4o"] string array fails schema validation.
 node openclaw.mjs config set models.providers.azure-openai-responses.api '"openai-responses"'
@@ -564,9 +566,12 @@ exec node openclaw.mjs gateway --allow-unconfigured --bind lan
               mountPath: '/home/node/.openclaw'
             }
           ]
+          // Container Apps requires memory to be exactly 2Gi per vCPU. The gateway alone sits
+          // near 1Gi, and `openclaw exec`/CLI sessions fork a second full Node process, so 2Gi
+          // total left no headroom and the shell was SIGKILLed (exit 137).
           resources: {
-            cpu: json('1.0')
-            memory: '2Gi'
+            cpu: json('2.0')
+            memory: '4Gi'
           }
         }
       ]
