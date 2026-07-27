@@ -281,6 +281,93 @@ if (cfg.commands && typeof cfg.commands === 'object') {
   delete cfg.commands.ownerDisplay;
   delete cfg.commands.ownerDisplaySecret;
 }
+// Retired Slack streaming aliases. The Slack plugin owns a doctor migration for these, but it only
+// runs once plugin discovery succeeds — and these keys make the config invalid before that can run.
+// Canonical shape: channels.slack.streaming.{mode,block.enabled,block.coalesce,nativeTransport}.
+function migrateSlackStreamingEntry(entry) {
+  if (!entry || typeof entry !== 'object') {
+    return;
+  }
+  const nextStreaming =
+    entry.streaming && typeof entry.streaming === 'object' && !Array.isArray(entry.streaming)
+      ? { ...entry.streaming }
+      : {};
+  if (typeof entry.streaming === 'boolean') {
+    nextStreaming.mode = entry.streaming ? 'partial' : 'off';
+  } else if (typeof entry.streaming === 'string') {
+    nextStreaming.mode = entry.streaming;
+  }
+  if (typeof entry.streamMode === 'string' && nextStreaming.mode === undefined) {
+    nextStreaming.mode = entry.streamMode;
+  }
+  if (typeof entry.blockStreaming === 'boolean') {
+    nextStreaming.block = {
+      ...(typeof nextStreaming.block === 'object' && nextStreaming.block ? nextStreaming.block : {}),
+      enabled: entry.blockStreaming,
+    };
+  }
+  if (entry.blockStreamingCoalesce && typeof entry.blockStreamingCoalesce === 'object') {
+    nextStreaming.block = {
+      ...(typeof nextStreaming.block === 'object' && nextStreaming.block ? nextStreaming.block : {}),
+      coalesce: entry.blockStreamingCoalesce,
+    };
+  }
+  if (typeof entry.nativeStreaming === 'boolean') {
+    nextStreaming.nativeTransport = entry.nativeStreaming;
+  }
+  if (typeof entry.chunkMode === 'string') {
+    nextStreaming.chunkMode = entry.chunkMode;
+  }
+  delete entry.blockStreaming;
+  delete entry.blockStreamingCoalesce;
+  delete entry.nativeStreaming;
+  delete entry.streamMode;
+  delete entry.chunkMode;
+  if (typeof entry.streaming !== 'object' || entry.streaming === null || Array.isArray(entry.streaming)) {
+    delete entry.streaming;
+  }
+  if (Object.keys(nextStreaming).length > 0) {
+    entry.streaming = nextStreaming;
+  }
+}
+const slack = cfg.channels && typeof cfg.channels === 'object' ? cfg.channels.slack : undefined;
+if (slack && typeof slack === 'object') {
+  migrateSlackStreamingEntry(slack);
+  if (slack.accounts && typeof slack.accounts === 'object') {
+    for (const account of Object.values(slack.accounts)) {
+      migrateSlackStreamingEntry(account);
+    }
+  }
+}
+// A plugins.load.paths entry that no longer exists on disk invalidates the whole config, which
+// aborts plugin discovery before any channel doctor contract can run its own migrations.
+// `config set` is NOT allowed against an invalid config, so this must be repaired before any
+// subsequent openclaw config mutation or gateway.mode will stay unset.
+if (cfg.plugins && typeof cfg.plugins === 'object') {
+  if (cfg.plugins.load && typeof cfg.plugins.load === 'object') {
+    const paths = cfg.plugins.load.paths;
+    if (Array.isArray(paths)) {
+      const present = paths.filter((p) => typeof p === 'string' && fs.existsSync(p));
+      if (present.length > 0) {
+        cfg.plugins.load.paths = present;
+      } else {
+        delete cfg.plugins.load.paths;
+        if (Object.keys(cfg.plugins.load).length === 0) {
+          delete cfg.plugins.load;
+        }
+      }
+    }
+  }
+  // Drop the stale token-budget entry when the plugin is not actually in the image.
+  if (
+    cfg.plugins.entries &&
+    typeof cfg.plugins.entries === 'object' &&
+    cfg.plugins.entries['token-budget'] &&
+    !fs.existsSync('/app/custom-plugins/token-budget')
+  ) {
+    delete cfg.plugins.entries['token-budget'];
+  }
+}
 if (cfg.agents && typeof cfg.agents === 'object') {
   const entries = cfg.agents.entries && typeof cfg.agents.entries === 'object'
     ? { ...cfg.agents.entries }
@@ -319,25 +406,33 @@ fs.writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`);
 EOF
 export NODE_OPTIONS="--require /tmp/patch.js"
 set -e
-# SQLite lives on the Azure File Share so credentials, sessions, cron jobs, and device pairings
-# survive restarts. OpenClaw classifies the CIFS mount and forces rollback journaling instead of
-# WAL, which is what avoids the SMB "database is locked" failures.
-# Earlier revisions symlinked these onto ephemeral local disk; undo that on upgrade.
-if [ -L /home/node/.openclaw/state ]; then
-  rm -f /home/node/.openclaw/state
+# Azure Files (CIFS) still returns "database is locked" under OpenClaw even with rollback
+# journaling — confirmed in production logs for plugin state + doctor migrations. Keep runtime
+# SQLite on local ephemeral disk; re-seed credentials each boot; accept that sessions/cron/pairings
+# reset on restart until a non-SMB volume is available.
+LOCAL_RUNTIME=/tmp/openclaw-runtime
+mkdir -p "$LOCAL_RUNTIME/state"
+if [ -d /home/node/.openclaw/state ] && [ ! -L /home/node/.openclaw/state ]; then
+  # Prefer a fresh local DB over a share-backed one that already deadlocks under load.
+  rm -rf /home/node/.openclaw/state
 fi
-mkdir -p /home/node/.openclaw/state
-unlink_agent_sqlite_symlinks() {
-  agent_dir="/home/node/.openclaw/agents/$1/agent"
-  mkdir -p "$agent_dir"
+ln -sfn "$LOCAL_RUNTIME/state" /home/node/.openclaw/state
+link_agent_sqlite_local() {
+  agent_id="$1"
+  agent_dir="/home/node/.openclaw/agents/$agent_id/agent"
+  local_dir="$LOCAL_RUNTIME/agents/$agent_id/agent"
+  mkdir -p "$local_dir" "$agent_dir"
   for f in openclaw-agent.sqlite openclaw-agent.sqlite-wal openclaw-agent.sqlite-shm; do
-    if [ -L "$agent_dir/$f" ]; then
+    if [ -e "$agent_dir/$f" ] && [ ! -L "$agent_dir/$f" ]; then
       rm -f "$agent_dir/$f"
+    fi
+    if [ ! -e "$agent_dir/$f" ]; then
+      ln -sfn "$local_dir/$f" "$agent_dir/$f"
     fi
   done
 }
 for agent_id in main planner executor; do
-  unlink_agent_sqlite_symlinks "$agent_id"
+  link_agent_sqlite_local "$agent_id"
 done
 # Retired credential files are detected by NAME ONLY and hard-fail every auth load with
 # AuthProfileMigrationRequiredError, even when the SQLite store is healthy. Doctor itself loads
@@ -347,7 +442,9 @@ rm -f /home/node/.openclaw/agents/*/agent/auth-profiles.json \
       /home/node/.openclaw/agents/*/agent/auth.json \
       /home/node/.openclaw/agents/*/agent/auth-state.json
 mkdir -p /home/node/.openclaw/workspace
-# Strip known-dead keys from the persisted Azure File Share config, then run doctor.
+# Strip known-dead keys from the persisted Azure File Share config BEFORE any config set.
+# `config set` refuses invalid config, so a stale token-budget path or Slack streaming alias
+# leaves gateway.mode unset and the gateway blocked.
 node /tmp/repair-config.js
 node openclaw.mjs doctor --non-interactive --fix --yes
 cat << 'AGENTS_EOF' > /home/node/.openclaw/workspace/AGENTS.md
@@ -465,12 +562,6 @@ You receive a fully-formed plan from the planner agent and carry it out step by 
 - Use available tools (web_search, rag-search, asireon-function-call, bash, etc.) as needed.
 - Return a structured summary of what was done and any outputs or artefacts produced.
 EXECUTOR_EOF
-# ── Token Budget Plugin ──────────────────────────────────────────
-# Load plugin directly from the Docker image filesystem (proper 755 perms).
-# Azure File Share mounts as 777 which triggers OpenClaw's world-writable
-# security check, so we use plugins.load.paths instead of copying to ~/.openclaw/extensions/.
-rm -rf /home/node/.openclaw/extensions/token-budget
-node openclaw.mjs config set plugins.load.paths '["/app/custom-plugins/token-budget"]'
 # Clear any stale plugins.allow allowlist that may persist on the Azure File Share from prior deployments.
 # An allowlist with only "token-budget" would silently block all other bundled channel plugins (including Slack).
 node openclaw.mjs config unset plugins.allow
@@ -482,25 +573,38 @@ node openclaw.mjs config set models.providers.azure-openai-responses.api '"opena
 node openclaw.mjs config set models.providers.azure-openai-responses.models '[{"id":"gpt-4o","name":"GPT-4o"}]'
 node openclaw.mjs config set models.providers.azure-openai-responses.baseUrl "$AZURE_OPENAI_BASE_URL"
 node openclaw.mjs config set models.providers.azure-openai-responses.apiKey "$AZURE_OPENAI_API_KEY"
-# Token budget plugin config (provider must exist before fallbackProvider is set)
-node openclaw.mjs config set plugins.entries.token-budget.enabled true
-node openclaw.mjs config set plugins.entries.token-budget.config.monthlyLimit 5000000
-node openclaw.mjs config set plugins.entries.token-budget.config.warningThreshold 0.9
-# Fall back to the Azure OpenAI deployment provisioned by this template. The provider carries an
-# explicit apiKey above, so embedded agents do not depend on env-var credential discovery.
-node openclaw.mjs config set plugins.entries.token-budget.config.fallbackProvider '"azure-openai-responses"'
-node openclaw.mjs config set plugins.entries.token-budget.config.fallbackModel '"gpt-4o"'
+# ── Token Budget Plugin ──────────────────────────────────────────
+# A missing plugins.load.paths entry is a hard config validation error, and an invalid config
+# cascades: plugin discovery aborts, channel doctor contracts never run their legacy migrations,
+# and gateway.mode reads as unset. Only register the path once the plugin is really in the image.
+rm -rf /home/node/.openclaw/extensions/token-budget
+if [ -d /app/custom-plugins/token-budget ]; then
+  node openclaw.mjs config set plugins.load.paths '["/app/custom-plugins/token-budget"]'
+  node openclaw.mjs config set plugins.entries.token-budget.enabled true
+  node openclaw.mjs config set plugins.entries.token-budget.config.monthlyLimit 5000000
+  node openclaw.mjs config set plugins.entries.token-budget.config.warningThreshold 0.9
+  # Fall back to the Azure OpenAI deployment provisioned by this template. The provider carries an
+  # explicit apiKey above, so embedded agents do not depend on env-var credential discovery.
+  node openclaw.mjs config set plugins.entries.token-budget.config.fallbackProvider '"azure-openai-responses"'
+  node openclaw.mjs config set plugins.entries.token-budget.config.fallbackModel '"gpt-4o"'
+else
+  echo "WARN: /app/custom-plugins/token-budget missing; clearing stale token-budget config." >&2
+  # Both the path and the entry invalidate config / emit stale-entry warnings. Clear both.
+  node openclaw.mjs config unset plugins.load.paths
+  node openclaw.mjs config unset plugins.entries.token-budget
+fi
 node /tmp/repair-config.js
 node openclaw.mjs doctor --non-interactive --fix --yes
-# Must run after doctor: a leftover legacy credential file makes every auth-store write fail,
-# and the agent SQLite stores live on ephemeral local disk, so they start empty on each boot.
+# Must run after doctor: a leftover legacy credential file makes every auth-store write fail.
+# Agent SQLite stores are on ephemeral local disk, so they start empty on each boot.
 for agent_id in main planner executor; do
   seed_agent_credentials "$agent_id"
 done
 # Re-assert last: the gateway start guard refuses to boot without gateway.mode, and doctor
 # rewrites the whole config file after every repair pass.
 node openclaw.mjs config set gateway.mode '"local"'
-exec node openclaw.mjs gateway --allow-unconfigured --bind lan
+node openclaw.mjs config set gateway.bind '"lan"'
+exec node openclaw.mjs gateway --bind lan
             '''
           ]
           env: [
