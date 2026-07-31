@@ -358,14 +358,19 @@ if (cfg.plugins && typeof cfg.plugins === 'object') {
       }
     }
   }
-  // Drop the stale token-budget entry when the plugin is not actually in the image.
-  if (
-    cfg.plugins.entries &&
-    typeof cfg.plugins.entries === 'object' &&
-    cfg.plugins.entries['token-budget'] &&
-    !fs.existsSync('/app/custom-plugins/token-budget')
-  ) {
-    delete cfg.plugins.entries['token-budget'];
+  // Drop stale plugin entries that are not present in this image. Leaving them in
+  // plugins.entries emits a warning on every subsequent `config set`.
+  if (cfg.plugins.entries && typeof cfg.plugins.entries === 'object') {
+    delete cfg.plugins.entries.whatsapp;
+    if (
+      cfg.plugins.entries['token-budget'] &&
+      !fs.existsSync('/app/custom-plugins/token-budget')
+    ) {
+      delete cfg.plugins.entries['token-budget'];
+    }
+    if (Object.keys(cfg.plugins.entries).length === 0) {
+      delete cfg.plugins.entries;
+    }
   }
 }
 if (cfg.agents && typeof cfg.agents === 'object') {
@@ -563,8 +568,6 @@ EXECUTOR_EOF
 # Clear any stale plugins.allow allowlist that may persist on the Azure File Share from prior deployments.
 # An allowlist with only "token-budget" would silently block all other bundled channel plugins (including Slack).
 node openclaw.mjs config unset plugins.allow
-# whatsapp is an external plugin that was never installed here; the stale entry only emits a warning.
-node openclaw.mjs config unset plugins.entries.whatsapp
 # Azure OpenAI provider for token budget fallback (must be configured before plugin refs it).
 # models[] entries are objects; a bare ["gpt-4o"] string array fails schema validation.
 node openclaw.mjs config set models.providers.azure-openai-responses.api '"openai-responses"'
