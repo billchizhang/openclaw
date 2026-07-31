@@ -455,6 +455,21 @@ cfg.channels = {
 cfg.tools = {
   ...(cfg.tools && typeof cfg.tools === 'object' ? cfg.tools : {}),
   profile: 'full',
+  // Managed web_search for DeepSeek (and other non-OpenAI) models. Gemini uses the
+  // existing GEMINI_API_KEY env; auto-detect can miss it if a stale provider pin remains.
+  web: {
+    ...(cfg.tools && cfg.tools.web && typeof cfg.tools.web === 'object' ? cfg.tools.web : {}),
+    search: {
+      ...(cfg.tools &&
+      cfg.tools.web &&
+      cfg.tools.web.search &&
+      typeof cfg.tools.web.search === 'object'
+        ? cfg.tools.web.search
+        : {}),
+      enabled: true,
+      provider: 'gemini',
+    },
+  },
 };
 cfg.agents = cfg.agents && typeof cfg.agents === 'object' ? cfg.agents : {};
 cfg.agents.defaults = {
@@ -509,18 +524,27 @@ cfg.models.providers = {
 };
 cfg.plugins = cfg.plugins && typeof cfg.plugins === 'object' ? cfg.plugins : {};
 delete cfg.plugins.allow;
+cfg.plugins.entries = {
+  ...(cfg.plugins.entries && typeof cfg.plugins.entries === 'object' ? cfg.plugins.entries : {}),
+  // Keep Google loaded so the gemini web_search provider registers at gateway startup.
+  google: {
+    ...(cfg.plugins.entries &&
+    cfg.plugins.entries.google &&
+    typeof cfg.plugins.entries.google === 'object'
+      ? cfg.plugins.entries.google
+      : {}),
+    enabled: true,
+  },
+};
 if (fs.existsSync('/app/custom-plugins/token-budget')) {
   cfg.plugins.load = { paths: ['/app/custom-plugins/token-budget'] };
-  cfg.plugins.entries = {
-    ...(cfg.plugins.entries && typeof cfg.plugins.entries === 'object' ? cfg.plugins.entries : {}),
-    'token-budget': {
-      enabled: true,
-      config: {
-        monthlyLimit: 5000000,
-        warningThreshold: 0.9,
-        fallbackProvider: 'azure-openai-responses',
-        fallbackModel: 'gpt-4o',
-      },
+  cfg.plugins.entries['token-budget'] = {
+    enabled: true,
+    config: {
+      monthlyLimit: 5000000,
+      warningThreshold: 0.9,
+      fallbackProvider: 'azure-openai-responses',
+      fallbackModel: 'gpt-4o',
     },
   };
 } else {
@@ -528,9 +552,7 @@ if (fs.existsSync('/app/custom-plugins/token-budget')) {
     delete cfg.plugins.load.paths;
     if (Object.keys(cfg.plugins.load).length === 0) delete cfg.plugins.load;
   }
-  if (cfg.plugins.entries) {
-    delete cfg.plugins.entries['token-budget'];
-  }
+  delete cfg.plugins.entries['token-budget'];
 }
 fs.writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`);
 EOF
