@@ -47,7 +47,10 @@ import {
   UNGROUPED_ID,
 } from "../../lib/sessions/grouping.ts";
 import type { SessionArchivedFilter } from "../../lib/sessions/index.ts";
-import { sessionNavigationTarget } from "../../lib/sessions/route-navigation.ts";
+import {
+  resolveSessionPreferredFace,
+  sessionNavigationTarget,
+} from "../../lib/sessions/route-navigation.ts";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
@@ -1120,10 +1123,13 @@ export function renderSessions(props: SessionsProps) {
         class=${extraClass}
         data-sortable
         data-sort-dir=${isActive ? props.sortDir : ""}
+        aria-sort=${isActive ? (props.sortDir === "asc" ? "ascending" : "descending") : nothing}
         @click=${() => props.onSortChange(col, isActive ? nextDir : "desc")}
       >
-        ${label}
-        <span class="data-table-sort-icon">${icons.arrowUpDown}</span>
+        <button class="data-table-sort-button" type="button">
+          ${label}
+          <span class="data-table-sort-icon" aria-hidden="true">${icons.arrowUpDown}</span>
+        </button>
       </th>
     `;
   };
@@ -1155,7 +1161,7 @@ export function renderSessions(props: SessionsProps) {
     </button>
   `;
   const children = [
-    props.error ? html`<div class="sessions-error">${props.error}</div>` : nothing,
+    props.error ? html`<div class="sessions-error" role="alert">${props.error}</div>` : nothing,
     props.result
       ? renderSettingsSection({}, renderSessionsOverview(rawRows, liveCount, props.statusFilter))
       : nothing,
@@ -1453,13 +1459,16 @@ function renderSessionsTable(props: SessionsProps, ctx: SessionsTableContext) {
             <div class="data-table-pagination__controls">
               <select
                 class="data-table-pagination__size"
+                aria-label=${t("sessionsView.pageSize")}
                 .value=${String(props.pageSize)}
                 @change=${(e: Event) =>
                   props.onPageSizeChange(Number((e.target as HTMLSelectElement).value))}
               >
                 ${PAGE_SIZES.map(
+                  // The matching option owns initial selection because the select's value
+                  // property binds before these dynamic children exist on first render.
                   (s) =>
-                    html`<option value=${s}>
+                    html`<option value=${s} ?selected=${s === props.pageSize}>
                       ${t("sessionsView.rowsPerPage", { count: String(s) })}
                     </option>`,
                 )}
@@ -1507,12 +1516,13 @@ function renderRows(row: GatewaySessionRow, props: SessionsProps) {
   const canLink = row.kind !== "global";
   const chatUrl = canLink
     ? sessionNavigationTarget({
-        face: "chat",
+        face: resolveSessionPreferredFace(row),
         sessionKey: row.key,
         fallbackAgentId: props.agentId,
         basePath: props.basePath,
         row,
         mainKey: props.mainKey,
+        preferenceDerivedFace: true,
       }).href
     : null;
   const displayKind = resolveSessionDisplayKind(row);
@@ -1578,7 +1588,7 @@ function renderRows(row: GatewaySessionRow, props: SessionsProps) {
           type="checkbox"
           .checked=${props.selectedKeys.has(row.key)}
           @change=${() => props.onToggleSelect(row.key)}
-          aria-label=${t("sessionsView.selectSession")}
+          aria-label=${`${t("sessionsView.selectSession")}: ${row.key}`}
         />
       </td>
       <td class="data-table-key-col">
@@ -1855,7 +1865,7 @@ function renderSessionDetailsRow(params: {
                 ${t("sessionsView.loadingCheckpoints")}
               </div>`
             : checkpointError
-              ? html`<div class="callout danger">${checkpointError}</div>`
+              ? html`<div class="callout danger" role="alert">${checkpointError}</div>`
               : !hasCheckpoints || checkpointItems.length === 0
                 ? html`<div class="muted session-details-empty">
                     ${t("sessionsView.noCheckpoints")}

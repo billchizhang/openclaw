@@ -4,7 +4,7 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { listAgentEntries, resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import {
-  canonicalizeSpawnedByForAgent,
+  resolveSessionStoreKey,
   resolveStoredSessionKeyForAgentStore,
 } from "../../gateway/session-store-key.js";
 import {
@@ -17,6 +17,9 @@ import { listOpenIncognitoAgentDatabases } from "../../state/openclaw-agent-db.j
 import type { OpenClawConfig } from "../types.openclaw.js";
 import { resolveStorePath } from "./paths.js";
 import { listSessionEntries, listSessionEntriesReadOnly } from "./session-accessor.js";
+import type { SessionEntryListScope } from "./session-accessor.types.js";
+import { canonicalSessionKeyMigrationRequiredError } from "./session-canonical-key.js";
+import { resolveDeliveryProvenCanonicalSessionKey } from "./store-entry.js";
 import {
   dedupeSessionStoreTargetsBySqliteTarget,
   listConfiguredSessionStoreAgentIds,
@@ -26,6 +29,8 @@ import {
   resolveSessionStoreTargets,
 } from "./targets.js";
 import type { SessionEntry } from "./types.js";
+
+type GatewaySessionEntryProjection = NonNullable<SessionEntryListScope["projection"]>;
 
 // Template-backed stores need per-agent scans before they can be merged for Gateway views.
 function isStorePathTemplate(store?: string): boolean {
@@ -42,28 +47,17 @@ function resolveCombinedStorePath(paths: string[], storeConfig?: string): string
 
 function loadGatewayStoreEntries(params: {
   agentId: string;
+  includeOpenDatabases?: boolean;
+  projection: GatewaySessionEntryProjection;
   storePath: string;
-}): Record<string, SessionEntry> {
-  return Object.fromEntries(
-    listSessionEntriesReadOnly({
-      agentId: params.agentId,
-      clone: false,
-      storePath: params.storePath,
-    }).map(({ sessionKey, entry }) => [sessionKey, entry]),
-  );
-}
-
-function loadIncognitoGatewayStoreEntries(params: {
-  agentId: string;
-  storePath: string;
-}): Record<string, SessionEntry> {
-  return Object.fromEntries(
-    listSessionEntries({
-      agentId: params.agentId,
-      clone: false,
-      storePath: params.storePath,
-    }).map(({ sessionKey, entry }) => [sessionKey, entry]),
-  );
+}) {
+  const listEntries = params.includeOpenDatabases ? listSessionEntries : listSessionEntriesReadOnly;
+  return listEntries({
+    agentId: params.agentId,
+    clone: false,
+    projection: params.projection,
+    storePath: params.storePath,
+  });
 }
 
 function mergeSessionEntryIntoCombined(params: {
@@ -75,36 +69,31 @@ function mergeSessionEntryIntoCombined(params: {
 }) {
   const { cfg, combined, entry, agentId, canonicalKey } = params;
   const existing = combined[canonicalKey];
-
-  if (existing && (existing.updatedAt ?? 0) > (entry.updatedAt ?? 0)) {
-    // Preserve the freshest entry while still canonicalizing spawnedBy for this agent store.
-    const spawnedBy = canonicalizeSpawnedByForAgent(
-      cfg,
-      agentId,
-      existing.spawnedBy ?? entry.spawnedBy,
-    );
-    combined[canonicalKey] = {
-      ...entry,
-      ...existing,
-      spawnedBy,
-    };
+  if (existing && (canonicalKey === "global" || canonicalKey === "unknown")) {
+    // Reserved sentinels remain per-store federation state until goal 3 decides
+    // how multi-store ownership composes; target order owns the projection.
     return;
   }
-
-  const spawnedBy = canonicalizeSpawnedByForAgent(
-    cfg,
-    agentId,
-    entry.spawnedBy ?? existing?.spawnedBy,
-  );
-  if (!existing && entry.spawnedBy === spawnedBy) {
-    combined[canonicalKey] = entry;
-  } else {
-    combined[canonicalKey] = {
-      ...existing,
-      ...entry,
-      spawnedBy,
-    };
+  if (existing) {
+    throw canonicalSessionKeyMigrationRequiredError(
+      `duplicate rows resolve to canonical session key ${canonicalKey}`,
+    );
   }
+  const deliveryCanonicalKey = resolveDeliveryProvenCanonicalSessionKey(canonicalKey, entry);
+  if (deliveryCanonicalKey !== canonicalKey) {
+    throw canonicalSessionKeyMigrationRequiredError(
+      `non-canonical persisted row resolves to session key ${deliveryCanonicalKey}`,
+    );
+  }
+  const resolveLineageKey = (sessionKey: string | undefined) =>
+    sessionKey ? resolveSessionStoreKey({ cfg, sessionKey, storeAgentId: agentId }) : undefined;
+  combined[canonicalKey] = {
+    ...entry,
+    ...(entry.parentSessionKey
+      ? { parentSessionKey: resolveLineageKey(entry.parentSessionKey) }
+      : {}),
+    ...(entry.spawnedBy ? { spawnedBy: resolveLineageKey(entry.spawnedBy) } : {}),
+  };
 }
 
 function mergeOpenIncognitoStores(params: {
@@ -112,6 +101,7 @@ function mergeOpenIncognitoStores(params: {
   cfg: OpenClawConfig;
   combined: Record<string, SessionEntry>;
   agentId?: string;
+  projection: GatewaySessionEntryProjection;
 }): string[] {
   const storePaths: string[] = [];
   for (const target of listOpenIncognitoAgentDatabases()) {
@@ -121,12 +111,14 @@ function mergeOpenIncognitoStores(params: {
     if (params.agentId && target.agentId !== params.agentId) {
       continue;
     }
-    const store = loadIncognitoGatewayStoreEntries({
+    const store = loadGatewayStoreEntries({
       agentId: target.agentId,
+      includeOpenDatabases: true,
+      projection: params.projection,
       storePath: target.storePath,
     });
     let merged = false;
-    for (const [sessionKey, entry] of Object.entries(store)) {
+    for (const { sessionKey, entry } of store) {
       if (!isIncognitoSessionKey(sessionKey) || entry.incognito !== true) {
         continue;
       }
@@ -149,7 +141,12 @@ function mergeOpenIncognitoStores(params: {
 /** Loads and canonicalizes session entries for gateway views across one or more agent stores. */
 export function loadCombinedSessionStoreForGateway(
   cfg: OpenClawConfig,
-  opts: { agentId?: string; configuredAgentsOnly?: boolean; includeIncognito?: boolean } = {},
+  opts: {
+    agentId?: string;
+    configuredAgentsOnly?: boolean;
+    includeIncognito?: boolean;
+    projection?: SessionEntryListScope["projection"];
+  } = {},
 ): {
   diagnostics?: string[];
   durableStorePath?: string;
@@ -157,6 +154,7 @@ export function loadCombinedSessionStoreForGateway(
   store: Record<string, SessionEntry>;
 } {
   const storeConfig = cfg.session?.store;
+  const projection = opts.projection ?? "full";
   const diagnostics: string[] = [];
   // Exclusion happens before path aggregation; filtering rows afterward would
   // still leak a live incognito handle by changing the projected store path.
@@ -197,13 +195,18 @@ export function loadCombinedSessionStoreForGateway(
       },
     );
     for (const { agentId, storePath } of ownerTargets) {
-      const store = loadGatewayStoreEntries({ agentId, storePath });
-      for (const [key, entry] of Object.entries(store)) {
+      const store = loadGatewayStoreEntries({ agentId, projection, storePath });
+      for (const { sessionKey: key, entry } of store) {
         const canonicalKey = resolveStoredSessionKeyForAgentStore({
           cfg,
           agentId,
           sessionKey: key,
         });
+        if (key !== canonicalKey) {
+          throw canonicalSessionKeyMigrationRequiredError(
+            `non-canonical persisted row resolves to session key ${canonicalKey}`,
+          );
+        }
         const canonicalAgentId = normalizeAgentId(
           parseAgentSessionKey(canonicalKey)?.agentId ?? agentId,
         );
@@ -229,6 +232,7 @@ export function loadCombinedSessionStoreForGateway(
           cfg,
           combined,
           ...(requestedAgentId ? { agentId: requestedAgentId } : {}),
+          projection,
         })
       : [];
     return {
@@ -247,13 +251,18 @@ export function loadCombinedSessionStoreForGateway(
   for (const target of targets) {
     const agentId = target.agentId;
     const storePath = target.storePath;
-    const store = loadGatewayStoreEntries({ agentId, storePath });
-    for (const [key, entry] of Object.entries(store)) {
+    const store = loadGatewayStoreEntries({ agentId, projection, storePath });
+    for (const { sessionKey: key, entry } of store) {
       const canonicalKey = resolveStoredSessionKeyForAgentStore({
         cfg,
         agentId,
         sessionKey: key,
       });
+      if (key !== canonicalKey) {
+        throw canonicalSessionKeyMigrationRequiredError(
+          `non-canonical persisted row resolves to session key ${canonicalKey}`,
+        );
+      }
       const canonicalAgentId = normalizeAgentId(
         parseAgentSessionKey(canonicalKey)?.agentId ?? agentId,
       );
@@ -279,6 +288,7 @@ export function loadCombinedSessionStoreForGateway(
         cfg,
         combined,
         ...(requestedAgentId ? { agentId: requestedAgentId } : {}),
+        projection,
       })
     : [];
 
