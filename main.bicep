@@ -406,41 +406,34 @@ fs.writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`);
 EOF
 export NODE_OPTIONS="--require /tmp/patch.js"
 set -e
-# Azure Files (CIFS) still returns "database is locked" under OpenClaw even with rollback
-# journaling — confirmed in production logs for plugin state + doctor migrations. Keep runtime
-# SQLite on local ephemeral disk; re-seed credentials each boot; accept that sessions/cron/pairings
-# reset on restart until a non-SMB volume is available.
-LOCAL_RUNTIME=/tmp/openclaw-runtime
-mkdir -p "$LOCAL_RUNTIME/state"
-if [ -d /home/node/.openclaw/state ] && [ ! -L /home/node/.openclaw/state ]; then
-  # Prefer a fresh local DB over a share-backed one that already deadlocks under load.
-  rm -rf /home/node/.openclaw/state
+# Azure Files (CIFS) deadlocks SQLite, and doctor refuses session SQLite import through any
+# symbolic-link path component. So do not symlink DBs: put the whole runtime state tree on
+# local disk via OPENCLAW_STATE_DIR, and keep only config + workspaces on the file share via
+# OPENCLAW_CONFIG_PATH. Credentials are re-seeded each boot; sessions/cron/pairings reset.
+export OPENCLAW_STATE_DIR=/tmp/openclaw-runtime
+export OPENCLAW_CONFIG_PATH=/home/node/.openclaw/openclaw.json
+mkdir -p "$OPENCLAW_STATE_DIR/state" "$OPENCLAW_STATE_DIR/agents"
+# Tear down leftover share-side SQLite symlinks from earlier revisions that doctor now rejects.
+if [ -L /home/node/.openclaw/state ]; then
+  rm -f /home/node/.openclaw/state
 fi
-ln -sfn "$LOCAL_RUNTIME/state" /home/node/.openclaw/state
-link_agent_sqlite_local() {
-  agent_id="$1"
-  agent_dir="/home/node/.openclaw/agents/$agent_id/agent"
-  local_dir="$LOCAL_RUNTIME/agents/$agent_id/agent"
-  mkdir -p "$local_dir" "$agent_dir"
+for agent_dir in /home/node/.openclaw/agents/*/agent; do
+  [ -d "$agent_dir" ] || continue
   for f in openclaw-agent.sqlite openclaw-agent.sqlite-wal openclaw-agent.sqlite-shm; do
-    if [ -e "$agent_dir/$f" ] && [ ! -L "$agent_dir/$f" ]; then
+    if [ -L "$agent_dir/$f" ]; then
       rm -f "$agent_dir/$f"
     fi
-    if [ ! -e "$agent_dir/$f" ]; then
-      ln -sfn "$local_dir/$f" "$agent_dir/$f"
-    fi
   done
-}
-for agent_id in main planner executor; do
-  link_agent_sqlite_local "$agent_id"
 done
 # Retired credential files are detected by NAME ONLY and hard-fail every auth load with
-# AuthProfileMigrationRequiredError, even when the SQLite store is healthy. Doctor itself loads
-# auth during its checks, so these must be gone before the first doctor run, not after. Keys are
-# re-seeded from env into SQLite below, so deleting them loses nothing.
+# AuthProfileMigrationRequiredError. Clear share leftovers and any copies under STATE_DIR.
+# Keys are re-seeded from env into SQLite below, so deleting them loses nothing.
 rm -f /home/node/.openclaw/agents/*/agent/auth-profiles.json \
       /home/node/.openclaw/agents/*/agent/auth.json \
-      /home/node/.openclaw/agents/*/agent/auth-state.json
+      /home/node/.openclaw/agents/*/agent/auth-state.json \
+      "$OPENCLAW_STATE_DIR"/agents/*/agent/auth-profiles.json \
+      "$OPENCLAW_STATE_DIR"/agents/*/agent/auth.json \
+      "$OPENCLAW_STATE_DIR"/agents/*/agent/auth-state.json
 mkdir -p /home/node/.openclaw/workspace
 # Strip known-dead keys from the persisted Azure File Share config BEFORE any config set.
 # `config set` refuses invalid config, so a stale token-budget path or Slack streaming alias
@@ -504,11 +497,16 @@ node openclaw.mjs config set tools.profile full
 node openclaw.mjs mcp set rag-search '{"url":"https://retrieval-mcp-server.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
 node openclaw.mjs mcp set asireon-function-call '{"url":"https://asireon-func-mcp.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
 node openclaw.mjs config set agents.defaults.model.primary '"deepseek/deepseek-v4-pro"'
+# Workspaces stay on the Azure File Share; agentDir is left unset so credentials/sessions land
+# under OPENCLAW_STATE_DIR (local disk). Clear any stale agentDir that pointed at the share.
 node openclaw.mjs config set 'agents.entries.planner' '{"default":true,"workspace":"/home/node/.openclaw/workspace-planner","model":{"primary":"deepseek/deepseek-v4-pro"},"thinkingDefault":"high","subagents":{"allowAgents":["executor"]}}'
 node openclaw.mjs config unset 'agents.entries.planner.model.fallback'
 node openclaw.mjs config unset 'agents.entries.planner.model.fallbacks'
+node openclaw.mjs config unset 'agents.entries.planner.agentDir'
 node openclaw.mjs config unset agents.list
 node openclaw.mjs config set 'agents.entries.executor' '{"workspace":"/home/node/.openclaw/workspace-executor","model":{"primary":"openai/gpt-5.4-mini"},"thinkingDefault":"adaptive"}'
+node openclaw.mjs config unset 'agents.entries.executor.agentDir'
+node openclaw.mjs config unset 'agents.entries.main.agentDir'
 # Seed API keys straight into each agent's SQLite auth store. paste-api-key reads the secret from
 # piped stdin when stdin is not a TTY, so no key is ever passed as an argument or written to disk.
 seed_credential() {
@@ -614,6 +612,16 @@ exec node openclaw.mjs gateway --bind lan
             {
               name: 'OPENCLAW_GATEWAY_TOKEN'
               secretRef: 'gateway-token'
+            }
+            // Split runtime state (local ephemeral disk) from config/workspaces (Azure Files).
+            // Symlinking SQLite files is rejected by doctor session import.
+            {
+              name: 'OPENCLAW_STATE_DIR'
+              value: '/tmp/openclaw-runtime'
+            }
+            {
+              name: 'OPENCLAW_CONFIG_PATH'
+              value: '/home/node/.openclaw/openclaw.json'
             }
 
             // Slack Integration
