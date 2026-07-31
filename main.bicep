@@ -635,15 +635,17 @@ cat << 'HEARTBEAT_EOF' > /home/node/.openclaw/workspace/HEARTBEAT.md
 - If nothing new to curate, reply HEARTBEAT_OK.
 HEARTBEAT_EOF
 # Install deployment skill from the image when present (source: deploy/skills/asireon-mcp/SKILL.md).
+# Azure Files rejects cp -a timestamp preserve ("Operation not permitted"); copy content only.
 SKILL_SRC=/app/deploy/skills/asireon-mcp
 if [ -f "$SKILL_SRC/SKILL.md" ]; then
-  mkdir -p /home/node/.openclaw/skills
-  rm -rf /home/node/.openclaw/skills/asireon-mcp
-  cp -a "$SKILL_SRC" /home/node/.openclaw/skills/asireon-mcp
-  for ws in workspace workspace-planner workspace-executor; do
-    mkdir -p "/home/node/.openclaw/$ws/skills"
-    rm -rf "/home/node/.openclaw/$ws/skills/asireon-mcp"
-    cp -a "$SKILL_SRC" "/home/node/.openclaw/$ws/skills/asireon-mcp"
+  for dest in \
+    /home/node/.openclaw/skills/asireon-mcp \
+    /home/node/.openclaw/workspace/skills/asireon-mcp \
+    /home/node/.openclaw/workspace-planner/skills/asireon-mcp \
+    /home/node/.openclaw/workspace-executor/skills/asireon-mcp
+  do
+    mkdir -p "$dest"
+    cp "$SKILL_SRC/SKILL.md" "$dest/SKILL.md"
   done
 fi
 mkdir -p /home/node/.openclaw/workspace-planner
