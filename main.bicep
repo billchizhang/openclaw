@@ -407,6 +407,122 @@ if (cfg.agents && typeof cfg.agents === 'object') {
     cfg.agents.entries = entries;
   }
 }
+// Apply the desired deployment config in ONE write. Each `openclaw config set` boots a full
+// Node process and re-discovers MCP tools (~6s each); 25+ of those never finish before ACA
+// recycles the replica. Mutate in-process, then doctor once.
+function parseJsonEnv(name, fallback) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+cfg.gateway = {
+  ...(cfg.gateway && typeof cfg.gateway === 'object' ? cfg.gateway : {}),
+  mode: 'local',
+  bind: 'lan',
+  trustedProxies: ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'],
+  controlUi: {
+    ...(cfg.gateway && cfg.gateway.controlUi && typeof cfg.gateway.controlUi === 'object'
+      ? cfg.gateway.controlUi
+      : {}),
+    allowedOrigins: [process.env.OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS].filter(Boolean),
+  },
+};
+cfg.channels = {
+  ...(cfg.channels && typeof cfg.channels === 'object' ? cfg.channels : {}),
+  slack: {
+    ...(cfg.channels && cfg.channels.slack && typeof cfg.channels.slack === 'object'
+      ? cfg.channels.slack
+      : {}),
+    enabled: true,
+    dmPolicy: 'open',
+    groupPolicy: 'open',
+    allowFrom: parseJsonEnv('OPENCLAW_SLACK_ALLOWED_MEMBERS', ['*']),
+  },
+};
+cfg.tools = {
+  ...(cfg.tools && typeof cfg.tools === 'object' ? cfg.tools : {}),
+  profile: 'full',
+};
+cfg.agents = cfg.agents && typeof cfg.agents === 'object' ? cfg.agents : {};
+cfg.agents.defaults = {
+  ...(cfg.agents.defaults && typeof cfg.agents.defaults === 'object' ? cfg.agents.defaults : {}),
+  model: { primary: 'deepseek/deepseek-v4-pro' },
+  heartbeat: {
+    model: 'deepseek/deepseek-v4-flash',
+    isolatedSession: true,
+    lightContext: true,
+    every: '12h',
+    target: 'slack',
+  },
+};
+cfg.agents.entries = {
+  planner: {
+    default: true,
+    workspace: '/home/node/.openclaw/workspace-planner',
+    model: { primary: 'deepseek/deepseek-v4-pro' },
+    thinkingDefault: 'high',
+    subagents: { allowAgents: ['executor'] },
+  },
+  executor: {
+    workspace: '/home/node/.openclaw/workspace-executor',
+    model: { primary: 'openai/gpt-5.4-mini' },
+    thinkingDefault: 'adaptive',
+  },
+};
+delete cfg.agents.list;
+cfg.mcp = {
+  ...(cfg.mcp && typeof cfg.mcp === 'object' ? cfg.mcp : {}),
+  servers: {
+    ...(cfg.mcp && cfg.mcp.servers && typeof cfg.mcp.servers === 'object' ? cfg.mcp.servers : {}),
+    'rag-search': {
+      url: 'https://retrieval-mcp-server.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp',
+      transport: 'streamable-http',
+    },
+    'asireon-function-call': {
+      url: 'https://asireon-func-mcp.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp',
+      transport: 'streamable-http',
+    },
+  },
+};
+cfg.models = cfg.models && typeof cfg.models === 'object' ? cfg.models : {};
+cfg.models.providers = {
+  ...(cfg.models.providers && typeof cfg.models.providers === 'object' ? cfg.models.providers : {}),
+  'azure-openai-responses': {
+    api: 'openai-responses',
+    models: [{ id: 'gpt-4o', name: 'GPT-4o' }],
+    baseUrl: process.env.AZURE_OPENAI_BASE_URL || '',
+    apiKey: process.env.AZURE_OPENAI_API_KEY || '',
+  },
+};
+cfg.plugins = cfg.plugins && typeof cfg.plugins === 'object' ? cfg.plugins : {};
+delete cfg.plugins.allow;
+if (fs.existsSync('/app/custom-plugins/token-budget')) {
+  cfg.plugins.load = { paths: ['/app/custom-plugins/token-budget'] };
+  cfg.plugins.entries = {
+    ...(cfg.plugins.entries && typeof cfg.plugins.entries === 'object' ? cfg.plugins.entries : {}),
+    'token-budget': {
+      enabled: true,
+      config: {
+        monthlyLimit: 5000000,
+        warningThreshold: 0.9,
+        fallbackProvider: 'azure-openai-responses',
+        fallbackModel: 'gpt-4o',
+      },
+    },
+  };
+} else {
+  if (cfg.plugins.load) {
+    delete cfg.plugins.load.paths;
+    if (Object.keys(cfg.plugins.load).length === 0) delete cfg.plugins.load;
+  }
+  if (cfg.plugins.entries) {
+    delete cfg.plugins.entries['token-budget'];
+  }
+}
 fs.writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`);
 EOF
 export NODE_OPTIONS="--require /tmp/patch.js"
@@ -440,11 +556,10 @@ rm -f /home/node/.openclaw/agents/*/agent/auth-profiles.json \
       "$OPENCLAW_STATE_DIR"/agents/*/agent/auth.json \
       "$OPENCLAW_STATE_DIR"/agents/*/agent/auth-state.json
 mkdir -p /home/node/.openclaw/workspace
-# Strip known-dead keys from the persisted Azure File Share config BEFORE any config set.
-# `config set` refuses invalid config, so a stale token-budget path or Slack streaming alias
-# leaves gateway.mode unset and the gateway blocked.
+# Repair + apply the full desired config in one Node write (see /tmp/repair-config.js).
+# Do NOT interleave dozens of `openclaw config set` calls: each boots Node + reloads MCP
+# (~6s), and ACA recycles the replica before `exec gateway` ever runs.
 node /tmp/repair-config.js
-node openclaw.mjs doctor --non-interactive --fix --yes
 cat << 'AGENTS_EOF' > /home/node/.openclaw/workspace/AGENTS.md
 # Agent Instructions
 
@@ -485,53 +600,6 @@ cat << 'HEARTBEAT_EOF' > /home/node/.openclaw/workspace/HEARTBEAT.md
 - Keep MEMORY.md concise: facts and decisions only, no raw transcript. Append; never overwrite existing entries.
 - If nothing new to curate, reply HEARTBEAT_OK.
 HEARTBEAT_EOF
-node openclaw.mjs config set gateway.mode '"local"'
-node openclaw.mjs config set gateway.bind '"lan"'
-node openclaw.mjs config set agents.defaults.heartbeat.model '"deepseek/deepseek-v4-flash"'
-node openclaw.mjs config set agents.defaults.heartbeat.isolatedSession true
-node openclaw.mjs config set agents.defaults.heartbeat.lightContext true
-node openclaw.mjs config set agents.defaults.heartbeat.every '"12h"'
-node openclaw.mjs config set agents.defaults.heartbeat.target '"slack"'
-node openclaw.mjs config set gateway.trustedProxies '["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]'
-node openclaw.mjs config set gateway.controlUi.allowedOrigins "[\"$OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS\"]"
-node openclaw.mjs config set channels.slack.enabled true
-node openclaw.mjs config set channels.slack.dmPolicy '"open"'
-node openclaw.mjs config set channels.slack.allowFrom "$OPENCLAW_SLACK_ALLOWED_MEMBERS"
-node openclaw.mjs config set channels.slack.groupPolicy '"open"'
-node openclaw.mjs config set tools.profile full
-node openclaw.mjs mcp set rag-search '{"url":"https://retrieval-mcp-server.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
-node openclaw.mjs mcp set asireon-function-call '{"url":"https://asireon-func-mcp.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp","transport":"streamable-http"}'
-node openclaw.mjs config set agents.defaults.model.primary '"deepseek/deepseek-v4-pro"'
-# Workspaces stay on the Azure File Share; agentDir is left unset so credentials/sessions land
-# under OPENCLAW_STATE_DIR (local disk). Clear any stale agentDir that pointed at the share.
-node openclaw.mjs config set 'agents.entries.planner' '{"default":true,"workspace":"/home/node/.openclaw/workspace-planner","model":{"primary":"deepseek/deepseek-v4-pro"},"thinkingDefault":"high","subagents":{"allowAgents":["executor"]}}'
-node openclaw.mjs config unset 'agents.entries.planner.model.fallback'
-node openclaw.mjs config unset 'agents.entries.planner.model.fallbacks'
-node openclaw.mjs config unset 'agents.entries.planner.agentDir'
-node openclaw.mjs config unset agents.list
-node openclaw.mjs config set 'agents.entries.executor' '{"workspace":"/home/node/.openclaw/workspace-executor","model":{"primary":"openai/gpt-5.4-mini"},"thinkingDefault":"adaptive"}'
-node openclaw.mjs config unset 'agents.entries.executor.agentDir'
-node openclaw.mjs config unset 'agents.entries.main.agentDir'
-# Seed API keys straight into each agent's SQLite auth store. paste-api-key reads the secret from
-# piped stdin when stdin is not a TTY, so no key is ever passed as an argument or written to disk.
-seed_credential() {
-  agent_id="$1"
-  provider="$2"
-  key="$3"
-  if [ -z "$key" ]; then
-    return 0
-  fi
-  if ! printf '%s' "$key" | node openclaw.mjs models auth --agent "$agent_id" paste-api-key \
-    --provider "$provider" --profile-id "$provider:default" >/dev/null; then
-    echo "WARN: failed to seed $provider credentials for agent $agent_id" >&2
-  fi
-}
-seed_agent_credentials() {
-  seed_credential "$1" deepseek "$DEEPSEEK_API_KEY"
-  seed_credential "$1" openai "$OPENAI_API_KEY"
-  seed_credential "$1" anthropic "$ANTHROPIC_API_KEY"
-  seed_credential "$1" google "$GEMINI_API_KEY"
-}
 mkdir -p /home/node/.openclaw/workspace-planner
 touch /home/node/.openclaw/workspace-planner/BOOTSTRAP.md
 cat << 'PLANNER_EOF' > /home/node/.openclaw/workspace-planner/AGENTS.md
@@ -565,46 +633,27 @@ You receive a fully-formed plan from the planner agent and carry it out step by 
 - Use available tools (web_search, rag-search, asireon-function-call, bash, etc.) as needed.
 - Return a structured summary of what was done and any outputs or artefacts produced.
 EXECUTOR_EOF
-# Clear any stale plugins.allow allowlist that may persist on the Azure File Share from prior deployments.
-# An allowlist with only "token-budget" would silently block all other bundled channel plugins (including Slack).
-node openclaw.mjs config unset plugins.allow
-# Azure OpenAI provider for token budget fallback (must be configured before plugin refs it).
-# models[] entries are objects; a bare ["gpt-4o"] string array fails schema validation.
-node openclaw.mjs config set models.providers.azure-openai-responses.api '"openai-responses"'
-node openclaw.mjs config set models.providers.azure-openai-responses.models '[{"id":"gpt-4o","name":"GPT-4o"}]'
-node openclaw.mjs config set models.providers.azure-openai-responses.baseUrl "$AZURE_OPENAI_BASE_URL"
-node openclaw.mjs config set models.providers.azure-openai-responses.apiKey "$AZURE_OPENAI_API_KEY"
-# ── Token Budget Plugin ──────────────────────────────────────────
-# A missing plugins.load.paths entry is a hard config validation error, and an invalid config
-# cascades: plugin discovery aborts, channel doctor contracts never run their legacy migrations,
-# and gateway.mode reads as unset. Only register the path once the plugin is really in the image.
 rm -rf /home/node/.openclaw/extensions/token-budget
-if [ -d /app/custom-plugins/token-budget ]; then
-  node openclaw.mjs config set plugins.load.paths '["/app/custom-plugins/token-budget"]'
-  node openclaw.mjs config set plugins.entries.token-budget.enabled true
-  node openclaw.mjs config set plugins.entries.token-budget.config.monthlyLimit 5000000
-  node openclaw.mjs config set plugins.entries.token-budget.config.warningThreshold 0.9
-  # Fall back to the Azure OpenAI deployment provisioned by this template. The provider carries an
-  # explicit apiKey above, so embedded agents do not depend on env-var credential discovery.
-  node openclaw.mjs config set plugins.entries.token-budget.config.fallbackProvider '"azure-openai-responses"'
-  node openclaw.mjs config set plugins.entries.token-budget.config.fallbackModel '"gpt-4o"'
-else
-  echo "WARN: /app/custom-plugins/token-budget missing; clearing stale token-budget config." >&2
-  # Both the path and the entry invalidate config / emit stale-entry warnings. Clear both.
-  node openclaw.mjs config unset plugins.load.paths
-  node openclaw.mjs config unset plugins.entries.token-budget
-fi
-node /tmp/repair-config.js
+# One doctor pass only — it loads MCP (asireon-function-call exposes hundreds of tools).
 node openclaw.mjs doctor --non-interactive --fix --yes
-# Must run after doctor: a leftover legacy credential file makes every auth-store write fail.
-# Agent SQLite stores are on ephemeral local disk, so they start empty on each boot.
-for agent_id in main planner executor; do
-  seed_agent_credentials "$agent_id"
-done
-# Re-assert last: the gateway start guard refuses to boot without gateway.mode, and doctor
-# rewrites the whole config file after every repair pass.
-node openclaw.mjs config set gateway.mode '"local"'
-node openclaw.mjs config set gateway.bind '"lan"'
+# Seed only the keys each agent actually needs. paste-api-key also boots a full CLI.
+seed_credential() {
+  agent_id="$1"
+  provider="$2"
+  key="$3"
+  if [ -z "$key" ]; then
+    return 0
+  fi
+  if ! printf '%s' "$key" | node openclaw.mjs models auth --agent "$agent_id" paste-api-key \
+    --provider "$provider" --profile-id "$provider:default" >/dev/null; then
+    echo "WARN: failed to seed $provider credentials for agent $agent_id" >&2
+  fi
+}
+seed_credential planner deepseek "$DEEPSEEK_API_KEY"
+seed_credential planner google "$GEMINI_API_KEY"
+seed_credential executor openai "$OPENAI_API_KEY"
+# Re-assert after doctor (it rewrites the config file).
+node /tmp/repair-config.js
 exec node openclaw.mjs gateway --bind lan
             '''
           ]
