@@ -609,6 +609,9 @@ When you call `web_search`, the tool result JSON contains a `citations` array wi
 2. Place citation links inline at the end of the relevant sentence or paragraph.
 3. Prefer URLs from the `citations` array (they are resolved/clean URLs).
 4. If `citations` is empty, use URLs from the References section in the content.
+
+## MCP / RAG
+Follow skill `asireon-mcp`: rag-search every user request; asireon-function-call retry/stickiness rules.
 AGENTS_EOF
 # Pre-create SOUL.md and USER.md so the personal-assistant templates are not scaffolded.
 cat << 'SOUL_EOF' > /home/node/.openclaw/workspace/SOUL.md
@@ -631,6 +634,18 @@ cat << 'HEARTBEAT_EOF' > /home/node/.openclaw/workspace/HEARTBEAT.md
 - Keep MEMORY.md concise: facts and decisions only, no raw transcript. Append; never overwrite existing entries.
 - If nothing new to curate, reply HEARTBEAT_OK.
 HEARTBEAT_EOF
+# Install deployment skill from the image when present (source: deploy/skills/asireon-mcp/SKILL.md).
+SKILL_SRC=/app/deploy/skills/asireon-mcp
+if [ -f "$SKILL_SRC/SKILL.md" ]; then
+  mkdir -p /home/node/.openclaw/skills
+  rm -rf /home/node/.openclaw/skills/asireon-mcp
+  cp -a "$SKILL_SRC" /home/node/.openclaw/skills/asireon-mcp
+  for ws in workspace workspace-planner workspace-executor; do
+    mkdir -p "/home/node/.openclaw/$ws/skills"
+    rm -rf "/home/node/.openclaw/$ws/skills/asireon-mcp"
+    cp -a "$SKILL_SRC" "/home/node/.openclaw/$ws/skills/asireon-mcp"
+  done
+fi
 mkdir -p /home/node/.openclaw/workspace-planner
 touch /home/node/.openclaw/workspace-planner/BOOTSTRAP.md
 cat << 'PLANNER_EOF' > /home/node/.openclaw/workspace-planner/AGENTS.md
@@ -643,10 +658,15 @@ You receive user tasks and produce a complete, actionable plan before any execut
 - Decompose the work into numbered, self-contained steps.
 - Once the plan is finalised, delegate ALL execution to the executor agent via `sessions_spawn`.
 
+## MCP / RAG (mandatory — see skill `asireon-mcp`)
+- Call MCP `rag-search` for every user request before finalising the plan.
+- Fold relevant RAG instructions into the plan and into the executor handoff.
+- If the user or RAG names a specific asireon endpoint/action, lock the plan to that endpoint (no alternate-endpoint fallback).
+
 ## Handoff rule (mandatory)
 When you have a complete plan, call `sessions_spawn` exactly once:
 - `agentId`: "executor"
-- `task`: the full plan as a structured prompt (include all context the executor will need)
+- `task`: the full plan as a structured prompt (include all context the executor will need, including RAG hits and any locked endpoint)
 - Do NOT attempt to execute any step yourself.
 
 After sessions_spawn returns, summarise the executor's result for the user.
@@ -663,6 +683,11 @@ You receive a fully-formed plan from the planner agent and carry it out step by 
 - Do not re-plan or ask clarifying questions — the plan is final.
 - Use available tools (web_search, rag-search, asireon-function-call, bash, etc.) as needed.
 - Return a structured summary of what was done and any outputs or artefacts produced.
+
+## MCP / RAG (mandatory — see skill `asireon-mcp`)
+- Call MCP `rag-search` for every user request / plan before acting (re-query on domain pivots).
+- For `asireon-function-call`: max 2 retries on the same endpoint/action (transient errors only).
+- If the user or RAG explicitly names an endpoint/action, use only that one; on failure after retries, report failure — do not try other endpoints.
 EXECUTOR_EOF
 rm -rf /home/node/.openclaw/extensions/token-budget
 # One doctor pass only — it loads MCP (asireon-function-call exposes hundreds of tools).
