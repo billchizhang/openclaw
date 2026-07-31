@@ -424,6 +424,15 @@ cfg.gateway = {
   mode: 'local',
   bind: 'lan',
   trustedProxies: ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'],
+  // Keep CLI (`openclaw logs`, etc.) and the gateway on the same token. A stale
+  // gateway.auth.token on the file share causes token_mismatch against OPENCLAW_GATEWAY_TOKEN.
+  auth: {
+    ...(cfg.gateway && cfg.gateway.auth && typeof cfg.gateway.auth === 'object'
+      ? cfg.gateway.auth
+      : {}),
+    mode: 'token',
+    token: '${OPENCLAW_GATEWAY_TOKEN}',
+  },
   controlUi: {
     ...(cfg.gateway && cfg.gateway.controlUi && typeof cfg.gateway.controlUi === 'object'
       ? cfg.gateway.controlUi
