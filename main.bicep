@@ -493,7 +493,7 @@ cfg.agents.entries = {
   },
   executor: {
     workspace: '/home/node/.openclaw/workspace-executor',
-    model: { primary: 'openai/gpt-5.4-mini' },
+    model: { primary: 'deepseek/deepseek-v4-pro' },
     thinkingDefault: 'adaptive',
   },
 };
@@ -709,6 +709,8 @@ seed_credential() {
 }
 seed_credential planner deepseek "$DEEPSEEK_API_KEY"
 seed_credential planner google "$GEMINI_API_KEY"
+seed_credential executor deepseek "$DEEPSEEK_API_KEY"
+# OpenAI key stays seeded for availability; executor primary model is DeepSeek.
 seed_credential executor openai "$OPENAI_API_KEY"
 # Re-assert after doctor (it rewrites the config file).
 node /tmp/repair-config.js
