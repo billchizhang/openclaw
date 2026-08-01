@@ -471,6 +471,17 @@ cfg.tools = {
     },
   },
 };
+// Memory embeddings default to OpenAI; pin Gemini so session-delta sync does not burn
+// OPENAI_API_KEY credits (chat already uses DeepSeek).
+cfg.memory = {
+  ...(cfg.memory && typeof cfg.memory === 'object' ? cfg.memory : {}),
+  search: {
+    ...(cfg.memory && cfg.memory.search && typeof cfg.memory.search === 'object'
+      ? cfg.memory.search
+      : {}),
+    provider: 'gemini',
+  },
+};
 cfg.agents = cfg.agents && typeof cfg.agents === 'object' ? cfg.agents : {};
 cfg.agents.defaults = {
   ...(cfg.agents.defaults && typeof cfg.agents.defaults === 'object' ? cfg.agents.defaults : {}),
