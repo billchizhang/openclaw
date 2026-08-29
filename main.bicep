@@ -439,6 +439,12 @@ cfg.gateway = {
       : {}),
     allowedOrigins: [process.env.OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS].filter(Boolean),
   },
+  // OpenAI-compatible HTTP API (/v1/chat/completions, /v1/responses, /v1/models) for
+  // programmatic prompts. Bearer auth = OPENCLAW_GATEWAY_TOKEN; treat as operator access.
+  http: {
+    ...(cfg.gateway && cfg.gateway.http && typeof cfg.gateway.http === 'object' ? cfg.gateway.http : {}),
+    endpoints: { chatCompletions: { enabled: true }, responses: { enabled: true } },
+  },
 };
 cfg.channels = {
   ...(cfg.channels && typeof cfg.channels === 'object' ? cfg.channels : {}),
