@@ -521,6 +521,12 @@ cfg.mcp = {
       url: 'https://asireon-func-mcp.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp',
       transport: 'streamable-http',
     },
+    // Financial GraphRAG gateway (ACA fingraphrag-pilotus-mcp, rg fingraphrag-pilotus-rg).
+    // Streamable HTTP at /mcp with SSE-framed responses; stateless, no auth header required.
+    fingraphrag: {
+      url: 'https://fingraphrag-pilotus-mcp.nicesea-bfeec3ce.eastus.azurecontainerapps.io/mcp',
+      transport: 'streamable-http',
+    },
   },
 };
 cfg.models = cfg.models && typeof cfg.models === 'object' ? cfg.models : {};
@@ -623,6 +629,7 @@ When you call `web_search`, the tool result JSON contains a `citations` array wi
 
 ## MCP / RAG
 Follow skill `asireon-mcp`: rag-search every user request; asireon-function-call retry/stickiness rules.
+For SEC filing / financial statement questions (10-K, 10-Q, XBRL metrics), use the `fingraphrag` MCP tools; report figures exactly as filed with their citations.
 AGENTS_EOF
 # Pre-create SOUL.md and USER.md so the personal-assistant templates are not scaffolded.
 cat << 'SOUL_EOF' > /home/node/.openclaw/workspace/SOUL.md
@@ -694,7 +701,8 @@ You receive a fully-formed plan from the planner agent and carry it out step by 
 ## Responsibilities
 - Execute each step of the plan completely and concisely.
 - Do not re-plan or ask clarifying questions — the plan is final.
-- Use available tools (web_search, rag-search, asireon-function-call, bash, etc.) as needed.
+- Use available tools (web_search, rag-search, asireon-function-call, fingraphrag, bash, etc.) as needed.
+- For SEC filing / financial statement data, use the `fingraphrag` MCP tools and keep the filed figures and citations they return.
 - Return a structured summary of what was done and any outputs or artefacts produced.
 
 ## MCP / RAG (mandatory — see skill `asireon-mcp`)
