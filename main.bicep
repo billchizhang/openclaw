@@ -509,18 +509,11 @@ cfg.agents.entries = {
   },
 };
 delete cfg.agents.list;
+// This template owns the MCP server map outright. openclaw.json persists on the file share,
+// so spreading the existing map would resurrect servers retired from the deployment.
 cfg.mcp = {
   ...(cfg.mcp && typeof cfg.mcp === 'object' ? cfg.mcp : {}),
   servers: {
-    ...(cfg.mcp && cfg.mcp.servers && typeof cfg.mcp.servers === 'object' ? cfg.mcp.servers : {}),
-    'rag-search': {
-      url: 'https://retrieval-mcp-server.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp',
-      transport: 'streamable-http',
-    },
-    'asireon-function-call': {
-      url: 'https://asireon-func-mcp.internal.lemonforest-578b1773.eastus.azurecontainerapps.io/mcp',
-      transport: 'streamable-http',
-    },
     // Financial GraphRAG gateway (ACA fingraphrag-pilotus-mcp, rg fingraphrag-pilotus-rg).
     // Streamable HTTP at /mcp with SSE-framed responses; stateless, no auth header required.
     fingraphrag: {
@@ -627,9 +620,8 @@ When you call `web_search`, the tool result JSON contains a `citations` array wi
 3. Prefer URLs from the `citations` array (they are resolved/clean URLs).
 4. If `citations` is empty, use URLs from the References section in the content.
 
-## MCP / RAG
-Follow skill `asireon-mcp`: rag-search every user request; asireon-function-call retry/stickiness rules.
-For SEC filing / financial statement questions (10-K, 10-Q, XBRL metrics), use the `fingraphrag` MCP tools; report figures exactly as filed with their citations.
+## MCP
+Follow skill `asireon-mcp`: for SEC filing / financial statement questions (10-K, 10-Q, XBRL metrics), use the `fingraphrag` MCP tools and report figures exactly as filed with their citations.
 AGENTS_EOF
 # Pre-create SOUL.md and USER.md so the personal-assistant templates are not scaffolded.
 cat << 'SOUL_EOF' > /home/node/.openclaw/workspace/SOUL.md
@@ -678,15 +670,13 @@ You receive user tasks and produce a complete, actionable plan before any execut
 - Decompose the work into numbered, self-contained steps.
 - Once the plan is finalised, delegate ALL execution to the executor agent via `sessions_spawn`.
 
-## MCP / RAG (mandatory — see skill `asireon-mcp`)
-- Call MCP `rag-search` for every user request before finalising the plan.
-- Fold relevant RAG instructions into the plan and into the executor handoff.
-- If the user or RAG names a specific asireon endpoint/action, lock the plan to that endpoint (no alternate-endpoint fallback).
+## MCP (see skill `asireon-mcp`)
+- For SEC filing / financial statement requests, plan around the `fingraphrag` MCP tools and name the entities, periods, and metrics the executor should query.
 
 ## Handoff rule (mandatory)
 When you have a complete plan, call `sessions_spawn` exactly once:
 - `agentId`: "executor"
-- `task`: the full plan as a structured prompt (include all context the executor will need, including RAG hits and any locked endpoint)
+- `task`: the full plan as a structured prompt (include all context the executor will need, including the entities, periods, and metrics to query)
 - Do NOT attempt to execute any step yourself.
 
 After sessions_spawn returns, summarise the executor's result for the user.
@@ -701,17 +691,15 @@ You receive a fully-formed plan from the planner agent and carry it out step by 
 ## Responsibilities
 - Execute each step of the plan completely and concisely.
 - Do not re-plan or ask clarifying questions — the plan is final.
-- Use available tools (web_search, rag-search, asireon-function-call, fingraphrag, bash, etc.) as needed.
+- Use available tools (web_search, fingraphrag, bash, etc.) as needed.
 - For SEC filing / financial statement data, use the `fingraphrag` MCP tools and keep the filed figures and citations they return.
 - Return a structured summary of what was done and any outputs or artefacts produced.
 
-## MCP / RAG (mandatory — see skill `asireon-mcp`)
-- Call MCP `rag-search` for every user request / plan before acting (re-query on domain pivots).
-- For `asireon-function-call`: max 2 retries on the same endpoint/action (transient errors only).
-- If the user or RAG explicitly names an endpoint/action, use only that one; on failure after retries, report failure — do not try other endpoints.
+## MCP (see skill `asireon-mcp`)
+- `fingraphrag` tools: max 2 retries per call, transient errors only; on failure, report the last error — never substitute numbers from memory.
 EXECUTOR_EOF
 rm -rf /home/node/.openclaw/extensions/token-budget
-# One doctor pass only — it loads MCP (asireon-function-call exposes hundreds of tools).
+# One doctor pass only — it connects every configured MCP server.
 node openclaw.mjs doctor --non-interactive --fix --yes
 # Seed only the keys each agent actually needs. paste-api-key also boots a full CLI.
 seed_credential() {
