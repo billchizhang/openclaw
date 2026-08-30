@@ -477,6 +477,30 @@ cfg.agents.entries = {
   },
 };
 delete cfg.agents.list;
+// Doctor writes the default agent id into systemAgent, talk, and channel bindings. Any
+// reference left pointing at a retired agent invalidates the whole config and blocks startup.
+const agentIds = new Set(Object.keys(cfg.agents.entries));
+function retargetAgentIds(node) {
+  if (Array.isArray(node)) {
+    node.forEach(retargetAgentIds);
+    return;
+  }
+  if (!node || typeof node !== 'object') return;
+  if (typeof node.agentId === 'string' && !agentIds.has(node.agentId)) {
+    node.agentId = 'main';
+  }
+  Object.values(node).forEach(retargetAgentIds);
+}
+retargetAgentIds(cfg);
+if (Array.isArray(cfg.bindings)) {
+  const seen = new Set();
+  cfg.bindings = cfg.bindings.filter((binding) => {
+    const key = JSON.stringify(binding);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 // This template owns the MCP server map outright. openclaw.json persists on the file share,
 // so spreading the existing map would resurrect servers retired from the deployment.
 cfg.mcp = {
