@@ -373,40 +373,6 @@ if (cfg.plugins && typeof cfg.plugins === 'object') {
     }
   }
 }
-if (cfg.agents && typeof cfg.agents === 'object') {
-  const entries = cfg.agents.entries && typeof cfg.agents.entries === 'object'
-    ? { ...cfg.agents.entries }
-    : {};
-  if (Array.isArray(cfg.agents.list)) {
-    for (const entry of cfg.agents.list) {
-      if (entry && typeof entry === 'object' && typeof entry.id === 'string' && entry.id.trim()) {
-        entries[entry.id] = { ...(entries[entry.id] ?? {}), ...entry };
-      }
-    }
-    delete cfg.agents.list;
-  }
-  // The entry key is the agent id; the keyed schema rejects a nested "id" field.
-  for (const entry of Object.values(entries)) {
-    if (entry && typeof entry === 'object') {
-      delete entry.id;
-    }
-  }
-  const ids = Object.keys(entries).filter((id) => entries[id] && typeof entries[id] === 'object');
-  if (ids.length > 0) {
-    // Schema requires exactly one default=true entry. Prefer planner over any stale
-    // default carried on the Azure File Share, which would otherwise win by key order.
-    const defaults = ids.filter((id) => entries[id].default === true);
-    const chosen = ids.includes('planner') ? 'planner' : (defaults[0] ?? ids[0]);
-    for (const id of ids) {
-      if (id === chosen) {
-        entries[id].default = true;
-      } else {
-        delete entries[id].default;
-      }
-    }
-    cfg.agents.entries = entries;
-  }
-}
 // Apply the desired deployment config in ONE write. Each `openclaw config set` boots a full
 // Node process and re-discovers MCP tools (~6s each); 25+ of those never finish before ACA
 // recycles the replica. Mutate in-process, then doctor once.
@@ -500,16 +466,12 @@ cfg.agents.defaults = {
     target: 'slack',
   },
 };
+// One agent, one model. Assigned wholesale so stale planner/executor entries on the file
+// share cannot survive; the schema requires exactly one default=true entry.
 cfg.agents.entries = {
-  planner: {
+  main: {
     default: true,
-    workspace: '/home/node/.openclaw/workspace-planner',
-    model: { primary: 'deepseek/deepseek-v4-pro' },
-    thinkingDefault: 'high',
-    subagents: { allowAgents: ['executor'] },
-  },
-  executor: {
-    workspace: '/home/node/.openclaw/workspace-executor',
+    workspace: '/home/node/.openclaw/workspace',
     model: { primary: 'deepseek/deepseek-v4-pro' },
     thinkingDefault: 'adaptive',
   },
@@ -628,6 +590,7 @@ When you call `web_search`, the tool result JSON contains a `citations` array wi
 
 ## MCP
 Follow skill `asireon-mcp`: for SEC filing / financial statement questions (10-K, 10-Q, XBRL metrics), use the `fingraphrag` MCP tools and report figures exactly as filed with their citations.
+Do the work yourself in this session — do not delegate to sub-agents. On a tool failure, retry at most twice for transient errors, then report the last error; never substitute numbers from memory.
 AGENTS_EOF
 # Pre-create SOUL.md and USER.md so the personal-assistant templates are not scaffolded.
 cat << 'SOUL_EOF' > /home/node/.openclaw/workspace/SOUL.md
@@ -656,58 +619,16 @@ SKILL_SRC=/app/deploy/skills/asireon-mcp
 if [ -f "$SKILL_SRC/SKILL.md" ]; then
   for dest in \
     /home/node/.openclaw/skills/asireon-mcp \
-    /home/node/.openclaw/workspace/skills/asireon-mcp \
-    /home/node/.openclaw/workspace-planner/skills/asireon-mcp \
-    /home/node/.openclaw/workspace-executor/skills/asireon-mcp
+    /home/node/.openclaw/workspace/skills/asireon-mcp
   do
     mkdir -p "$dest"
     cp "$SKILL_SRC/SKILL.md" "$dest/SKILL.md"
   done
 fi
-mkdir -p /home/node/.openclaw/workspace-planner
-touch /home/node/.openclaw/workspace-planner/BOOTSTRAP.md
-cat << 'PLANNER_EOF' > /home/node/.openclaw/workspace-planner/AGENTS.md
-# Planner Agent
-
-You receive user tasks and produce a complete, actionable plan before any execution begins.
-
-## Responsibilities
-- Analyse the request thoroughly using extended thinking.
-- Decompose the work into numbered, self-contained steps.
-- Once the plan is finalised, delegate ALL execution to the executor agent via `sessions_spawn`.
-
-## MCP (see skill `asireon-mcp`)
-- For SEC filing / financial statement requests, plan around the `fingraphrag` MCP tools and name the entities, periods, and metrics the executor should query.
-
-## Handoff rule (mandatory)
-When you have a complete plan, call `sessions_spawn` exactly once:
-- `agentId`: "executor"
-- `task`: the full plan as a structured prompt (include all context the executor will need, including the entities, periods, and metrics to query)
-- Do NOT attempt to execute any step yourself.
-
-After sessions_spawn returns, summarise the executor's result for the user.
-PLANNER_EOF
-mkdir -p /home/node/.openclaw/workspace-executor
-touch /home/node/.openclaw/workspace-executor/BOOTSTRAP.md
-cat << 'EXECUTOR_EOF' > /home/node/.openclaw/workspace-executor/AGENTS.md
-# Executor Agent
-
-You receive a fully-formed plan from the planner agent and carry it out step by step.
-
-## Responsibilities
-- Execute each step of the plan completely and concisely.
-- Do not re-plan or ask clarifying questions — the plan is final.
-- Use available tools (web_search, fingraphrag, bash, etc.) as needed.
-- For SEC filing / financial statement data, use the `fingraphrag` MCP tools and keep the filed figures and citations they return.
-- Return a structured summary of what was done and any outputs or artefacts produced.
-
-## MCP (see skill `asireon-mcp`)
-- `fingraphrag` tools: max 2 retries per call, transient errors only; on failure, report the last error — never substitute numbers from memory.
-EXECUTOR_EOF
 rm -rf /home/node/.openclaw/extensions/token-budget
 # One doctor pass only — it connects every configured MCP server.
 node openclaw.mjs doctor --non-interactive --fix --yes
-# Seed only the keys each agent actually needs. paste-api-key also boots a full CLI.
+# Seed the agent's provider keys. paste-api-key boots a full CLI, so keep the list short.
 seed_credential() {
   agent_id="$1"
   provider="$2"
@@ -720,11 +641,10 @@ seed_credential() {
     echo "WARN: failed to seed $provider credentials for agent $agent_id" >&2
   fi
 }
-seed_credential planner deepseek "$DEEPSEEK_API_KEY"
-seed_credential planner google "$GEMINI_API_KEY"
-seed_credential executor deepseek "$DEEPSEEK_API_KEY"
-# OpenAI key stays seeded for availability; executor primary model is DeepSeek.
-seed_credential executor openai "$OPENAI_API_KEY"
+seed_credential main deepseek "$DEEPSEEK_API_KEY"
+seed_credential main google "$GEMINI_API_KEY"
+# OpenAI key stays seeded for availability; the primary model is DeepSeek.
+seed_credential main openai "$OPENAI_API_KEY"
 # Re-assert after doctor (it rewrites the config file).
 node /tmp/repair-config.js
 exec node openclaw.mjs gateway --bind lan
